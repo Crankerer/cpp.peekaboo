@@ -14,7 +14,7 @@
 
 namespace pb {
 
-enum class Kind { Image, Text, Other };
+enum class Kind { Image, Text, Media, Other };
 
 struct FileEntry {
     std::filesystem::path path;

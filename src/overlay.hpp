@@ -2,10 +2,12 @@
 
 #include <chrono>
 #include <deque>
+#include <memory>
 #include <unordered_map>
 
 #include <imgui.h>
 
+#include "media.hpp"
 #include "preview.hpp"
 
 struct GLFWwindow;
@@ -25,6 +27,7 @@ public:
 
     void show(const std::filesystem::path& file);  // opens, or switches to another file
     void close();
+    void togglePlayback();
 
     [[nodiscard]] bool open() const noexcept { return open_; }
     [[nodiscard]] const std::filesystem::path& file() const noexcept { return current_.path; }
@@ -39,6 +42,7 @@ private:
 
         Texture() = default;
         explicit Texture(const ImageData& image);
+        Texture(int width, int height);  // empty, refilled every frame by the player
         ~Texture();
         Texture(Texture&& other) noexcept;
         Texture& operator=(Texture&& other) noexcept;
@@ -46,6 +50,7 @@ private:
         Texture& operator=(const Texture&) = delete;
 
         [[nodiscard]] bool valid() const noexcept { return id != 0; }
+        void write(const std::uint8_t* bgra) const;
     };
 
     struct Entry {
@@ -65,6 +70,7 @@ private:
     void drawHeader(const Entry* entry, float titleLimit);
     [[nodiscard]] float drawOpenWith(const ImVec2& panelMin, const ImVec2& panelMax);
     void drawContent(const Entry* entry, const ImVec2& min, const ImVec2& max, float ease);
+    void drawMedia(const Entry* entry, const ImVec2& min, const ImVec2& max, float ease);
     void drawFooter(const Entry* entry, const ImVec2& min, const ImVec2& max, float ease);
 
     GLFWwindow* window_;
@@ -80,6 +86,9 @@ private:
     FileEntry current_;
     std::filesystem::path siblingDir_;
     std::vector<FileEntry> siblings_;  // the folder listing, for neighbour prefetch
+
+    std::unique_ptr<media::Player> player_;  // alive only while a media file is on screen
+    Texture video_;                          // streaming target for the player's frames
 
     Texture backdrop_;        // blurred snapshot of whatever is behind the panel
     ImVec2 backdropOrigin_{};  // screen region that snapshot covers

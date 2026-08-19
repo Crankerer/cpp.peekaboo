@@ -20,6 +20,9 @@
 #ifndef GL_CLAMP_TO_EDGE
 #define GL_CLAMP_TO_EDGE 0x812F
 #endif
+#ifndef GL_BGRA
+#define GL_BGRA 0x80E1  // lets video frames go to the GPU without a byte swap
+#endif
 
 namespace fs = std::filesystem;
 
@@ -28,6 +31,8 @@ namespace {
 
 constexpr ImU32 kText = IM_COL32(228, 230, 236, 255);
 constexpr ImU32 kMuted = IM_COL32(138, 143, 156, 255);
+constexpr ImU32 kAccent = IM_COL32(96, 165, 250, 255);
+constexpr ImU32 kTrack = IM_COL32(72, 76, 92, 235);
 constexpr ImU32 kPanelTint = IM_COL32(20, 21, 27, 178);  // darkens the backdrop so text stays readable
 
 constexpr int kMaxWidth = 1366;  // 768p is the upper bound for the panel
@@ -38,10 +43,13 @@ constexpr int kIconWidth = 520;  // nothing but an icon and a note to show
 constexpr int kIconHeight = 460;
 constexpr int kUnknownWidth = 960;  // size while the preview is still decoding
 constexpr int kUnknownHeight = 640;
+constexpr int kMediaWidth = 640;  // audio, and video before its size is known
+constexpr int kMediaHeight = 480;
+constexpr int kTimelineHeight = 46;
 constexpr int kBlurDivisor = 8;
 constexpr float kButtonRounding = 8.0f;  // matches the radius Windows 11 rounds the window with
-constexpr ImU32 kButton = IM_COL32(58, 62, 76, 235);
-constexpr ImU32 kButtonHover = IM_COL32(78, 84, 102, 245);  // how hard the snapshot is shrunk, which is the blur radius
+constexpr ImU32 kButton = IM_COL32(18, 19, 23, 205);  // same weight as the text preview background
+constexpr ImU32 kButtonHover = IM_COL32(34, 36, 44, 225);  // how hard the snapshot is shrunk, which is the blur radius
 constexpr int kChromeX = 44;   // padding left and right of the content
 constexpr int kChromeY = 122;  // title, meta line, separator and footer
 constexpr int kUploadsPerFrame = 2;
@@ -52,6 +60,7 @@ ImU32 kindColor(Kind kind) {
     switch (kind) {
         case Kind::Image: return IM_COL32(45, 122, 118, 255);
         case Kind::Text: return IM_COL32(58, 92, 150, 255);
+        case Kind::Media: return IM_COL32(120, 74, 148, 255);
         case Kind::Other: return IM_COL32(72, 74, 84, 255);
     }
     return kMuted;
@@ -126,6 +135,12 @@ std::string ellipsize(const std::string& text, ImFont* font, float size, float m
     return std::string(text.c_str(), remaining) + "...";
 }
 
+std::string clockText(double seconds) {
+    if (seconds < 0.0 || seconds > 360000.0) seconds = 0.0;
+    const auto total = static_cast<int>(seconds);
+    return std::format("{}:{:02}", total / 60, total % 60);
+}
+
 // Fits a width:height box into an area and returns its top-left corner plus size.
 std::pair<ImVec2, ImVec2> fitInto(const ImVec2& areaMin, const ImVec2& areaMax, int width, int height) {
     const ImVec2 area = areaMax - areaMin;
@@ -164,6 +179,23 @@ Overlay::Texture::Texture(const ImageData& image) : width(image.width), height(i
     }
 }
 
+Overlay::Texture::Texture(int width, int height) : width(width), height(height) {
+    glGenTextures(1, &id);
+    glBindTexture(GL_TEXTURE_2D, id);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_BGRA, GL_UNSIGNED_BYTE, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);  // no mips, this is rewritten every frame
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+}
+
+void Overlay::Texture::write(const std::uint8_t* bgra) const {
+    glBindTexture(GL_TEXTURE_2D, id);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_BGRA, GL_UNSIGNED_BYTE, bgra);
+}
+
 Overlay::Texture::~Texture() {
     if (id) glDeleteTextures(1, &id);
 }
@@ -196,6 +228,10 @@ void Overlay::show(const fs::path& file) {
     lastOpenWasHit_ = lookup(current_) != nullptr;
     if (!lastOpenWasHit_) loader_.request(current_, true);
 
+    player_.reset();  // whatever was playing belongs to the file we just left
+    video_ = Texture{};
+    if (current_.kind == Kind::Media) player_ = std::make_unique<media::Player>(current_.path);
+
     if (const fs::path parent = file.parent_path(); parent != siblingDir_) {
         siblingDir_ = parent;
         siblings_ = scanDirectory(parent);
@@ -210,7 +246,13 @@ void Overlay::show(const fs::path& file) {
     }
 }
 
+void Overlay::togglePlayback() {
+    if (player_) player_->toggle();
+}
+
 void Overlay::close() {
+    player_.reset();
+    video_ = Texture{};
     open_ = false;
     anim_ = 0.0f;
     glfwHideWindow(window_);
@@ -241,6 +283,15 @@ void Overlay::layoutWindow() {
                                       static_cast<float>(maxHeight - kChromeY) / entry->texture.height});
         width = std::clamp(static_cast<int>(entry->texture.width * scale) + kChromeX, kMinWidth, maxWidth);
         height = std::clamp(static_cast<int>(entry->texture.height * scale) + kChromeY, kMinHeight, maxHeight);
+    } else if (player_ && player_->hasVideo() && player_->width() > 0) {
+        const float scale = std::min({1.0f, static_cast<float>(maxWidth - kChromeX) / player_->width(),
+                                      static_cast<float>(maxHeight - kChromeY - kTimelineHeight) / player_->height()});
+        width = std::clamp(static_cast<int>(player_->width() * scale) + kChromeX, kMinWidth, maxWidth);
+        height = std::clamp(static_cast<int>(player_->height() * scale) + kChromeY + kTimelineHeight, kMinHeight,
+                            maxHeight);
+    } else if (current_.kind == Kind::Media) {
+        width = std::min(kMediaWidth, maxWidth);  // audio, or video we have not opened yet
+        height = std::min(kMediaHeight, maxHeight);
     } else if (entry && std::holds_alternative<InfoData>(entry->preview.content)) {
         width = std::min(kIconWidth, maxWidth);  // just an icon and a note
         height = std::min(kIconHeight, maxHeight);
@@ -361,6 +412,13 @@ void Overlay::frame(float dt) {
     if (frameTimes_.size() > kFrameHistory) frameTimes_.pop_front();
 
     pumpLoader();
+    if (player_) {
+        if (const auto frame = player_->takeFrame()) {
+            if (!video_.valid() || video_.width != frame->width || video_.height != frame->height)
+                video_ = Texture(frame->width, frame->height);
+            video_.write(frame->bgra.data());
+        }
+    }
     layoutWindow();  // a preview that was not prefetched only reveals its size now
 
     anim_ += (1.0f - anim_) * (1.0f - std::exp(-dt * 22.0f));  // close() resets it, so this only ever fades in
@@ -445,7 +503,10 @@ void Overlay::drawHeader(const Entry* entry, float titleLimit) {
     if (fonts_.ui) ImGui::PopFont();
 
     std::string meta = std::format("{}   {}", current_.ext.empty() ? "file" : current_.ext, humanSize(current_.size));
-    if (entry) {
+    if (player_) {
+        if (const std::string details = player_->details(); !details.empty()) meta += "   " + details;
+        meta += std::format("   {}", clockText(player_->duration()));
+    } else if (entry) {
         if (const auto* image = std::get_if<ImageData>(&entry->preview.content))
             meta += std::format("   {} x {} px", image->sourceWidth, image->sourceHeight);
         meta += std::format("   decoded in {:.2f} ms", entry->preview.loadMs);
@@ -457,8 +518,54 @@ void Overlay::drawHeader(const Entry* entry, float titleLimit) {
     ImGui::Separator();
 }
 
+// Video picture or cover art, with the transport underneath.
+void Overlay::drawMedia(const Entry* entry, const ImVec2& min, const ImVec2& max, float ease) {
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    const ImVec2 pictureMax(max.x, max.y - kTimelineHeight);
+
+    if (player_->failed()) {
+        centeredText(ImGui::GetFont(), 16.0f, min, max, (min.y + max.y) * 0.5f, fade(kMuted, ease),
+                     "Windows cannot decode this file");
+        return;
+    }
+
+    if (video_.valid()) {
+        const auto [pos, size] = fitInto(min, pictureMax, video_.width, video_.height);
+        draw->AddImageRounded(textureId(video_.id), pos, pos + size, ImVec2(0, 0), ImVec2(1, 1),
+                              fade(IM_COL32_WHITE, ease), 8.0f);
+    } else if (entry && entry->texture.valid()) {  // cover art, or the poster the shell gave us
+        const float side = std::min({256.0f, pictureMax.x - min.x, pictureMax.y - min.y});
+        const float scale = side / static_cast<float>(std::max(entry->texture.width, entry->texture.height));
+        const ImVec2 centre((min.x + pictureMax.x) * 0.5f, (min.y + pictureMax.y) * 0.5f);
+        const ImVec2 half(entry->texture.width * scale * 0.5f, entry->texture.height * scale * 0.5f);
+        draw->AddImage(textureId(entry->texture.id), centre - half, centre + half, ImVec2(0, 0), ImVec2(1, 1),
+                       fade(IM_COL32_WHITE, ease));
+    }
+
+    const double duration = player_->duration();
+    const double position = duration > 0.0 ? std::min(player_->position(), duration) : player_->position();
+
+    const ImVec2 trackMin(min.x + 6.0f, max.y - 28.0f);
+    const ImVec2 trackMax(max.x - 6.0f, trackMin.y + 5.0f);
+    draw->AddRectFilled(trackMin, trackMax, fade(kTrack, ease), 2.5f);
+    if (duration > 0.0) {
+        const auto played = static_cast<float>(position / duration);
+        draw->AddRectFilled(trackMin, ImVec2(trackMin.x + (trackMax.x - trackMin.x) * played, trackMax.y),
+                            fade(kAccent, ease), 2.5f);
+    }
+
+    const char* state = player_->failed() ? "" : (player_->playing() ? "playing" : "paused");
+    centeredText(ImGui::GetFont(), 15.0f, min, max, trackMax.y + 7.0f, fade(kMuted, ease),
+                 std::format("{} / {}   {}", clockText(position), clockText(duration), state));
+}
+
 void Overlay::drawContent(const Entry* entry, const ImVec2& min, const ImVec2& max, float ease) {
     ImDrawList* draw = ImGui::GetWindowDrawList();
+
+    if (player_) {
+        drawMedia(entry, min, max, ease);
+        return;
+    }
 
     if (!entry) {
         centeredText(ImGui::GetFont(), 16.0f, min, max, (min.y + max.y) * 0.5f, fade(kMuted, ease), "decoding...");
@@ -525,10 +632,11 @@ void Overlay::drawFooter(const Entry* entry, const ImVec2& min, const ImVec2& ma
     if (!frameTimes_.empty()) average /= static_cast<float>(frameTimes_.size());
 
     const auto* text = entry ? std::get_if<TextData>(&entry->preview.content) : nullptr;
-    const std::string footer =
-        std::format("Space / Esc close     arrows browse     open {:.2f} ms ({})     {:.0f} FPS     cache {} / {}{}",
-                    lastOpenMs_, lastOpenWasHit_ ? "prefetched" : "decoded", average > 0.0f ? 1000.0f / average : 0.0f,
-                    humanSize(cacheBytes_), humanSize(budget_), text && text->truncated ? "     truncated at 1 MiB" : "");
+    const std::string footer = std::format(
+        "Space / Esc close     arrows browse{}     open {:.2f} ms ({})     {:.0f} FPS     cache {} / {}{}",
+        player_ ? "     Enter play / pause" : "", lastOpenMs_, lastOpenWasHit_ ? "prefetched" : "decoded",
+        average > 0.0f ? 1000.0f / average : 0.0f, humanSize(cacheBytes_), humanSize(budget_),
+        text && text->truncated ? "     truncated at 1 MiB" : "");
 
     centeredText(ImGui::GetFont(), 16.0f, min, max, max.y + 6.0f, fade(kMuted, ease), footer);
 }

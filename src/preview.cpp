@@ -17,6 +17,7 @@
 #include <windows.h>
 #include <shobjidl.h>
 #include <shlwapi.h>
+#include <wincodec.h>
 #else
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -194,16 +195,22 @@ std::string lowerAscii(std::string s) {
 }
 
 Kind kindForExtension(std::string_view ext) {
-    static constexpr std::array images{"png", "jpg", "jpeg", "bmp", "gif", "webp", "tga", "psd", "hdr", "ppm", "pgm"};
+    static constexpr std::array images{"png",  "jpg",  "jpeg", "bmp",  "gif", "webp", "tga", "psd",
+                                      "hdr",  "ppm",  "pgm",  "tiff", "tif", "ico",  "heic", "heif",
+                                      "avif", "jxr"};
     static constexpr std::array texts{
         "txt",  "md",   "markdown", "cpp",  "cxx",  "cc",   "c",     "h",    "hpp",  "hxx", "inl", "cs",
         "java", "kt",   "py",       "rb",   "rs",   "go",   "js",    "ts",   "jsx",  "tsx", "json", "xml",
         "html", "htm",  "css",      "scss", "yaml", "yml",  "toml",  "ini",  "cfg",  "conf", "log", "csv",
         "tsv",  "sql",  "sh",       "bat",  "ps1",  "cmake", "make", "glsl", "hlsl", "lua", "php",  "swift"};
 
+    static constexpr std::array media{"mp3", "wav",  "flac", "m4a", "aac", "wma", "ogg",  "opus", "mp4", "m4v",
+                                     "mov", "mkv",  "avi",  "wmv", "webm", "mpg", "mpeg", "ts",   "flv"};
+
     const auto matches = [ext](const auto& list) { return std::ranges::find(list, ext) != list.end(); };
     if (matches(images)) return Kind::Image;
     if (matches(texts)) return Kind::Text;
+    if (matches(media)) return Kind::Media;
     return Kind::Other;
 }
 
@@ -247,6 +254,57 @@ ImageData boxDownscale(const std::uint8_t* src, int width, int height, int facto
     return out;
 }
 
+ImageData limitSize(ImageData image) {
+    const int factor = (std::max(image.width, image.height) + kMaxImageDim - 1) / kMaxImageDim;
+    if (factor <= 1) return image;
+
+    ImageData reduced = boxDownscale(image.rgba.data(), image.width, image.height, factor);
+    reduced.sourceWidth = image.sourceWidth;
+    reduced.sourceHeight = image.sourceHeight;
+    return reduced;
+}
+
+// Everything stb_image does not know: webp, tiff, ico, and whatever codecs the
+// system has installed. Returns an empty image if Windows cannot read it either.
+ImageData decodeWithWic(const fs::path& path) {
+    IWICImagingFactory* rawFactory = nullptr;
+    if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&rawFactory))))
+        return {};
+    const ComPtr<IWICImagingFactory> factory{rawFactory};
+
+    IWICBitmapDecoder* rawDecoder = nullptr;
+    if (FAILED(factory->CreateDecoderFromFilename(path.c_str(), nullptr, GENERIC_READ, WICDecodeMetadataCacheOnDemand,
+                                                  &rawDecoder)))
+        return {};
+    const ComPtr<IWICBitmapDecoder> decoder{rawDecoder};
+
+    IWICBitmapFrameDecode* rawFrame = nullptr;
+    if (FAILED(decoder->GetFrame(0, &rawFrame))) return {};
+    const ComPtr<IWICBitmapFrameDecode> frame{rawFrame};
+
+    IWICFormatConverter* rawConverter = nullptr;
+    if (FAILED(factory->CreateFormatConverter(&rawConverter))) return {};
+    const ComPtr<IWICFormatConverter> converter{rawConverter};
+    if (FAILED(converter->Initialize(frame.get(), GUID_WICPixelFormat32bppRGBA, WICBitmapDitherTypeNone, nullptr, 0.0,
+                                     WICBitmapPaletteTypeCustom)))
+        return {};
+
+    UINT width = 0;
+    UINT height = 0;
+    if (FAILED(converter->GetSize(&width, &height)) || width == 0 || height == 0) return {};
+
+    ImageData image;
+    image.width = static_cast<int>(width);
+    image.height = static_cast<int>(height);
+    image.sourceWidth = image.width;
+    image.sourceHeight = image.height;
+    image.rgba.resize(static_cast<std::size_t>(width) * height * 4);
+
+    if (FAILED(converter->CopyPixels(nullptr, width * 4, static_cast<UINT>(image.rgba.size()), image.rgba.data())))
+        return {};
+    return image;
+}
+
 Content decodeImage(const FileEntry& file, std::span<const std::byte> raw) {
     int width = 0;
     int height = 0;
@@ -254,7 +312,10 @@ Content decodeImage(const FileEntry& file, std::span<const std::byte> raw) {
     const std::unique_ptr<stbi_uc, decltype([](stbi_uc* p) { stbi_image_free(p); })> pixels{stbi_load_from_memory(
         reinterpret_cast<const stbi_uc*>(raw.data()), static_cast<int>(raw.size()), &width, &height, &channels, 4)};
 
-    if (!pixels) return fallback(file, std::format("Cannot decode image ({})", stbi_failure_reason()));
+    if (!pixels) {
+        if (ImageData viaWindows = decodeWithWic(file.path); !viaWindows.rgba.empty()) return limitSize(std::move(viaWindows));
+        return fallback(file, std::format("Cannot decode image ({})", stbi_failure_reason()));
+    }
 
     ImageData image;
     if (const int factor = (std::max(width, height) + kMaxImageDim - 1) / kMaxImageDim; factor > 1) {
@@ -298,7 +359,7 @@ Content decodeText(std::span<const std::byte> raw) {
 
 Content loadContent(const FileEntry& file) {
     if (file.size == 0) return fallback(file, "Empty file");
-    if (file.ext == "webp") return fallback(file, "WebP is not supported by stb_image");
+    if (file.kind == Kind::Media) return fallback(file, "");
     if (file.kind == Kind::Other && file.size > kBlobLimit) return fallback(file, "No preview available");
 
     const MappedFile mapped(file.path);

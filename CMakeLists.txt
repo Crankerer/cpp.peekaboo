@@ -30,7 +30,12 @@ FetchContent_Declare(stb
     GIT_REPOSITORY https://github.com/nothings/stb.git
     GIT_TAG 2c980bb59875b0d32144a71867fbdebb2f77cd20)
 
-FetchContent_MakeAvailable(glfw imgui stb)
+FetchContent_Declare(miniaudio
+    GIT_REPOSITORY https://github.com/mackron/miniaudio.git
+    GIT_TAG 9634bedb5b5a2ca38c1ee7108a9358a4e233f14d
+    SOURCE_SUBDIR do-not-build)  # header only, skip its own targets
+
+FetchContent_MakeAvailable(glfw imgui stb miniaudio)
 
 find_package(OpenGL REQUIRED)
 
@@ -46,16 +51,18 @@ target_link_libraries(imgui PUBLIC glfw OpenGL::GL)
 
 add_executable(peekaboo
     src/main.cpp
+    src/media.cpp
     src/overlay.cpp
     src/preview.cpp
     src/shell.cpp)
 set_target_properties(peekaboo PROPERTIES WIN32_EXECUTABLE TRUE)
-target_include_directories(peekaboo PRIVATE ${stb_SOURCE_DIR})
+target_include_directories(peekaboo PRIVATE ${stb_SOURCE_DIR} ${miniaudio_SOURCE_DIR})
 target_link_libraries(peekaboo PRIVATE imgui glfw OpenGL::GL)
 
 if(WIN32)
     target_compile_definitions(peekaboo PRIVATE UNICODE _UNICODE)
-    target_link_libraries(peekaboo PRIVATE dwmapi ole32 oleaut32 shell32 shlwapi uuid winmm)
+    target_link_libraries(peekaboo PRIVATE dwmapi mfplat mfreadwrite mfuuid ole32 oleaut32 shell32 shlwapi
+                                       uuid windowscodecs winmm)
 endif()
 
 if(MSVC)  # keep int main() with the Windows subsystem

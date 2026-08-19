@@ -24,6 +24,7 @@ build\peekaboo.exe
 | `Space` | open the preview for the selected file, or close it again |
 | `Esc` | close the preview |
 | arrow keys | move the Explorer selection; the open preview follows |
+| `Enter` | play / pause, while an audio or video preview is open |
 
 The tray icon's context menu has a single entry, *Exit PeekaBoo*.
 
@@ -36,13 +37,35 @@ the original macOS shortcut makes.
 | Type | Rendering |
 | --- | --- |
 | `png` `jpg` `bmp` `gif` `tga` `psd` `hdr` `ppm` `pgm` | decoded with stb_image, uploaded as a GPU texture |
+| `webp` `tiff` `ico` `heic` `avif` `jxr` | decoded by Windows Imaging Component, which picks up whatever codecs are installed |
 | `txt` `md` and ~40 code/config extensions | monospace text, virtualised so only visible lines cost anything |
+| `mp4` `mkv` `mov` `avi` `webm` and friends | played with sound, picture and a timeline |
+| `mp3` `wav` `flac` `m4a` `aac` `wma` | played, with the embedded cover art if there is one |
 | anything else | whatever the shell itself shows for the file, plus name, size and the reason |
 
 Files without a known extension are sniffed: if the first 4 KB look like text, they are rendered
-as text. The fallback asks the shell through `IShellItemImageFactory`, so PDFs, videos and Office
+as text. Images go to stb_image first and fall back to WIC, which is how formats stb cannot read
+still work. The last fallback asks the shell through `IShellItemImageFactory`, so PDFs and Office
 documents get the same thumbnail Explorer would show, and everything else gets its file type icon.
-`webp` is detected but not decodable - stb_image has no WebP support - and says so.
+
+## Playing media
+
+Audio and video play through Media Foundation - no ffmpeg, no vendored binaries, it is already
+part of Windows. `IMFSourceReader` demuxes and decodes, and is told to hand back plain RGB32
+frames and 48 kHz stereo PCM, so the format conversions and the scaling happen inside Windows'
+own video processor rather than in our code. Video larger than the panel is scaled down there
+too, which keeps both the frame queue and the upload cost small.
+
+Playback keeps the same rule as everything else: **the render thread never decodes**. A worker
+thread pulls samples, pushes PCM into a ring buffer and frames into a short queue, and blocks
+once either fills - that back-pressure is what paces decoding to playback. The audio device
+drains the ring and doubles as the clock; each frame the render thread asks which picture belongs
+to the current playback position, drops anything late, and uploads at most one texture. Files
+without an audio track fall back to a wall clock.
+
+Frames go to the GPU as `GL_BGRA`, the byte order Media Foundation already produces, so no pixel
+is touched on the way. Pausing silences the audio callback rather than stopping the device: the
+device only notices a stop between samples, which let the clock drift past the pause.
 
 ## Performance design
 
@@ -75,8 +98,8 @@ cache hit, frame rate and cache usage.
 
 ## How the panel looks the way it does
 
-The panel sizes itself to its content, up to 1080p: an image gets a window that hugs it and is
-never scaled up, a fallback gets a small one, text gets the full size. It is centred on whichever
+The panel sizes itself to its content, up to 1366 x 768: an image or video gets a window that
+hugs it and is never scaled up, a fallback gets a small one, text gets the full size. It is centred on whichever
 monitor Explorer is on.
 
 Its rounded corners come from `DWMWA_WINDOW_CORNER_PREFERENCE`. The obvious alternative,
@@ -99,12 +122,13 @@ arrowing on to another file only moves the sampled UV rectangle; nothing is grab
 
 ## Architecture
 
-Four translation units, flat, no framework:
+Five translation units, flat, no framework:
 
 | File | Responsibility |
 | --- | --- |
 | `src/main.cpp` | tray icon, low-level keyboard hook, event loop |
 | `src/shell.cpp` | Windows shell integration: which file is selected in the focused Explorer/desktop view |
+| `src/media.cpp` | audio and video playback: Media Foundation decoding, audio output, clock |
 | `src/preview.cpp` | worker pool, memory mapped I/O, image and text decoding, shell icons |
 | `src/overlay.cpp` | the preview panel: GPU texture cache, backdrop, layout, drawing |
 
@@ -122,7 +146,8 @@ shows up in the taskbar or Alt+Tab.
 ## Build
 
 Requires CMake 3.24+, a C++20 compiler and network access on the first configure - GLFW,
-Dear ImGui and stb are fetched by `FetchContent` at pinned versions.
+Dear ImGui, stb and miniaudio are fetched by `FetchContent` at pinned versions. Everything else
+comes from Windows itself.
 
 ```bash
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
@@ -139,5 +164,8 @@ Windows subsystem executable, with `/ENTRY:mainCRTStartup` so `int main()` stays
 - The backdrop is frozen: it shows the screen as it was when the preview opened. Anything moving
   underneath while it is open is not picked up.
 - Explorer's own sort order is not read; neighbour prefetch uses a name sort of the folder.
+- Media files are never prefetched - browsing a folder of videos would otherwise start a decoder
+  per neighbour. They show the shell's poster until the player has its first frame.
+- Playback cannot be seeked, and Media Foundation brings no Ogg Vorbis or Opus.
 - Mouse wheel scrolling in text previews relies on the Windows "scroll inactive windows on hover"
   setting, which is on by default, because the panel never takes focus.

@@ -16,6 +16,7 @@
 #include <thread>
 #include <filesystem>
 
+#include "media.hpp"
 #include "overlay.hpp"
 #include "shell.hpp"
 
@@ -31,8 +32,10 @@ constexpr UINT kTrayExit = 1;
 // Written by the keyboard hook, consumed by the event loop.
 std::atomic<bool> gToggle{false};
 std::atomic<bool> gClose{false};
+std::atomic<bool> gPlayPause{false};
 std::atomic<bool> gOverlayOpen{false};
 bool gSwallowedSpace = false;
+bool gSwallowedEnter = false;
 
 NOTIFYICONDATAW gTray{};
 
@@ -54,6 +57,17 @@ LRESULT CALLBACK keyboardHook(int code, WPARAM message, LPARAM data) {
         }
         if (up && gSwallowedSpace) {
             gSwallowedSpace = false;
+            return 1;
+        }
+    }
+    if (key.vkCode == VK_RETURN && overlayOpen) {
+        if (down) {
+            gPlayPause.store(true, std::memory_order_relaxed);
+            gSwallowedEnter = true;
+            return 1;  // Explorer must not open the file behind our back
+        }
+        if (up && gSwallowedEnter) {
+            gSwallowedEnter = false;
             return 1;
         }
     }
@@ -162,6 +176,7 @@ int main() {
     // frame cap lands nowhere near its target.
     timeBeginPeriod(1);
     if (!pb::shell::initialize()) return fail(L"COM could not be initialised.");
+    if (!pb::media::initialize()) return fail(L"Media Foundation could not be initialised.");
     if (!glfwInit()) return fail(L"GLFW could not be initialised.");
 
     GLFWwindow* window = createOverlayWindow();
@@ -207,6 +222,7 @@ int main() {
                     overlay.show(*file);
             }
             if (gClose.exchange(false)) overlay.close();
+            if (gPlayPause.exchange(false)) overlay.togglePlayback();
 
             if (overlay.open()) {  // arrow keys stay in Explorer, we just follow its selection
                 if (const auto file = pb::shell::selectedFile(); file && *file != overlay.file()) overlay.show(*file);
@@ -245,6 +261,7 @@ int main() {
     ImGui::DestroyContext();
     glfwDestroyWindow(window);
     glfwTerminate();
+    pb::media::shutdown();
     pb::shell::shutdown();
     timeEndPeriod(1);
     return 0;
