@@ -1,92 +1,92 @@
-### Modernes, lesbares und wartbares C++ verwenden
+### Write modern, readable and maintainable C++
 
-Generiere ausschließlich modernen, idiomatischen C++-Code. Verwende nach Möglichkeit **C++20 oder neuer** und nutze moderne Sprachfeatures und die Standardbibliothek sinnvoll.
+Generate modern, idiomatic C++ only. Use **C++20 or newer** where possible and make sensible use of modern language features and the standard library.
 
-Der Code soll nicht nur funktionieren, sondern **einfach, kurz, übersichtlich, gut lesbar und langfristig wartbar** sein. Bevorzuge die einfachste Lösung, die das Problem sauber und robust löst.
+The code should not merely work, it should be **simple, short, clear, readable and maintainable in the long run**. Prefer the simplest solution that solves the problem cleanly and robustly.
 
-### Grundprinzipien
+### Core principles
 
-- Verwende bevorzugt **C++20 oder neuer**.
-- Schreibe **möglichst kurzen und prägnanten Code**, ohne die Lesbarkeit zu beeinträchtigen.
-- Vermeide unnötige Abstraktionen, Wrapper, Klassen, Helper-Funktionen und Design Patterns.
-- **Keine Overengineering-Lösungen**: Nicht jede Kleinigkeit muss abstrahiert werden.
-- Bevorzuge einfache, direkte Lösungen gegenüber unnötig komplexen Architekturen.
-- Code soll auf den ersten Blick verständlich sein.
-- Verwende aussagekräftige und kurze Namen für Variablen, Funktionen und Typen.
-- Vermeide unnötige Kommentare. Kommentare sollen nur erklären, **warum** etwas gemacht wird, nicht offensichtliches **was**.
-- Vermeide unnötige Verschachtelungen und lange Funktionen.
-- Bevorzuge Early Returns und Guard Clauses, wenn sie den Kontrollfluss vereinfachen.
-- Halte Funktionen möglichst klein und fokussiert.
-- Vermeide Code-Duplikation, aber erstelle dafür keine unnötigen Abstraktionen.
-- Bevorzuge **Composition statt unnötiger Vererbung**.
+- Prefer **C++20 or newer**.
+- Write **short and concise code**, without hurting readability.
+- Avoid unnecessary abstractions, wrappers, classes, helper functions and design patterns.
+- **No over-engineering**: not every detail needs to be abstracted.
+- Prefer simple, direct solutions over unnecessarily complex architectures.
+- Code should be understandable at first glance.
+- Use meaningful and short names for variables, functions and types.
+- Avoid unnecessary comments. Comments should explain **why** something is done, not the obvious **what**.
+- Avoid unnecessary nesting and long functions.
+- Prefer early returns and guard clauses when they simplify control flow.
+- Keep functions small and focused.
+- Avoid code duplication, but do not create unnecessary abstractions for it.
+- Prefer **composition over unnecessary inheritance**.
 
-### Wenige Dateien und übersichtliche Struktur
+### Few files and a clear structure
 
-Halte die Anzahl der Dateien **so gering wie sinnvoll möglich**.
+Keep the number of files **as small as reasonably possible**.
 
-- Erstelle nicht für jede Klasse, Struktur oder kleine Funktion eine eigene Datei.
-- Kleine, eng zusammengehörige Komponenten dürfen sich in derselben Header-/Source-Datei befinden.
-- Teile Code nur dann auf mehrere Dateien auf, wenn dies die Übersichtlichkeit oder Wartbarkeit tatsächlich verbessert.
-- Vermeide unnötige Verzeichnis- und Modulstrukturen.
-- Die Projektstruktur soll auf einen Blick verständlich sein.
-- Bevorzuge eine **flache und übersichtliche Struktur** gegenüber einer tief verschachtelten Architektur.
-- Vermeide Boilerplate und Dateien, die nur wenige Zeilen enthalten, sofern sie keinen klaren Zweck erfüllen.
+- Do not create a separate file for every class, struct or small function.
+- Small, closely related components may live in the same header/source file.
+- Only split code across multiple files when that genuinely improves clarity or maintainability.
+- Avoid unnecessary directory and module structures.
+- The project structure should be understandable at a glance.
+- Prefer a **flat and clear structure** over a deeply nested architecture.
+- Avoid boilerplate and files that contain only a few lines, unless they serve a clear purpose.
 
-### Modernes C++ statt C-Style
+### Modern C++ instead of C style
 
-Vermeide alte C-Style-Patterns, sofern eine moderne C++-Alternative existiert:
+Avoid old C-style patterns whenever a modern C++ alternative exists:
 
-- Keine manuellen `new`/`delete`-Aufrufe → RAII und Smart Pointer verwenden.
-- Keine C-Style-Arrays → `std::array`, `std::vector` oder passende Container verwenden.
-- Keine C-Style-Casts → passende C++-Casts oder bessere Typen verwenden.
-- `nullptr` statt `NULL` oder `0`.
-- `enum class` statt klassischer Enums.
-- `std::string` / `std::string_view` statt C-Strings.
-- Moderne STL-Container und Algorithmen verwenden.
-- `std::optional`, `std::variant` und `std::expected` einsetzen, wenn sie das Design vereinfachen.
-- `constexpr`, `consteval`, `const`, `noexcept` und `[[nodiscard]]` sinnvoll einsetzen.
-- Concepts, Ranges und Structured Bindings verwenden, wenn sie den Code tatsächlich klarer machen.
-- `auto` verwenden, wenn dadurch der Code besser lesbar wird.
-- Keine unnötigen Makros.
-- Keine unnötige Verwendung der C-Standardbibliothek, wenn eine bessere C++-Alternative existiert.
-- C-APIs, falls notwendig, möglichst an einer klar abgegrenzten Stelle kapseln.
+- No manual `new`/`delete` calls -> use RAII and smart pointers.
+- No C-style arrays -> use `std::array`, `std::vector` or a fitting container.
+- No C-style casts -> use the appropriate C++ casts or better types.
+- `nullptr` instead of `NULL` or `0`.
+- `enum class` instead of plain enums.
+- `std::string` / `std::string_view` instead of C strings.
+- Use modern STL containers and algorithms.
+- Use `std::optional`, `std::variant` and `std::expected` when they simplify the design.
+- Use `constexpr`, `consteval`, `const`, `noexcept` and `[[nodiscard]]` sensibly.
+- Use concepts, ranges and structured bindings when they genuinely make the code clearer.
+- Use `auto` when it improves readability.
+- No unnecessary macros.
+- No unnecessary use of the C standard library when a better C++ alternative exists.
+- If C APIs are necessary, encapsulate them in one clearly delimited place.
 
-### Lesbarkeit vor Cleverness
+### Readability over cleverness
 
-Bevorzuge immer:
+Always prefer:
 
-**klarer Code > cleverer Code**  
-**einfacher Code > abstrakter Code**  
-**weniger Code > mehr Boilerplate**  
-**wenige Dateien > unnötige Aufteilung**  
-**moderne C++-Features > alte C-Patterns**
+**clear code > clever code**
+**simple code > abstract code**
+**less code > more boilerplate**
+**few files > unnecessary splitting**
+**modern C++ features > old C patterns**
 
-Vermeide insbesondere extrem kompakten oder „cleveren“ Code, der zwar kurz ist, aber schwer verständlich wird. Kürze darf niemals auf Kosten der Lesbarkeit gehen.
+Avoid extremely compact or "clever" code in particular: short but hard to understand is a bad trade. Brevity must never come at the cost of readability.
 
-Wenn eine Lösung beispielsweise mit 10 klaren Zeilen statt mit 3 kryptischen Zeilen umgesetzt werden kann, ist die klarere Lösung zu bevorzugen.
+If a solution can be written in 10 clear lines instead of 3 cryptic ones, the clearer solution wins.
 
-### Speicher und Ressourcen
+### Memory and resources
 
-- Verwende **RAII** konsequent.
-- Bevorzuge `std::unique_ptr` gegenüber `std::shared_ptr`, wenn Shared Ownership nicht tatsächlich benötigt wird.
-- Vermeide rohe Pointer, sofern sie nicht ausdrücklich als Non-Owning Pointer benötigt werden.
-- Vermeide unnötige Kopien.
-- Nutze Move-Semantik sinnvoll, aber nicht zwanghaft.
-- Ressourcen wie Dateien, Locks, Sockets oder Handles sollen automatisch und sicher verwaltet werden.
+- Apply **RAII** consistently.
+- Prefer `std::unique_ptr` over `std::shared_ptr` unless shared ownership is genuinely needed.
+- Avoid raw pointers unless they are explicitly needed as non-owning pointers.
+- Avoid unnecessary copies.
+- Use move semantics sensibly, but not compulsively.
+- Resources such as files, locks, sockets or handles must be managed automatically and safely.
 
-### Fehlerbehandlung
+### Error handling
 
-- Verwende eine zur Situation passende, moderne Fehlerbehandlung.
-- Bevorzuge `std::optional` für „Wert vorhanden oder nicht“.
-- Bevorzuge `std::expected` für erwartbare Fehler, sofern verfügbar.
-- Verwende Exceptions dort, wo sie sinnvoll sind.
-- Vermeide Fehlercodes und manuelle Fehlerbehandlung im C-Stil, wenn eine bessere C++-Lösung möglich ist.
+- Use modern error handling that fits the situation.
+- Prefer `std::optional` for "value present or not".
+- Prefer `std::expected` for expected errors, where available.
+- Use exceptions where they make sense.
+- Avoid C-style error codes and manual error handling when a better C++ solution is possible.
 
-### Standardbibliothek bevorzugen
+### Prefer the standard library
 
-Bevor eigene Lösungen geschrieben werden, prüfen, ob die C++-Standardbibliothek bereits eine passende Lösung bietet.
+Before writing custom solutions, check whether the C++ standard library already offers a fitting one.
 
-Bevorzuge beispielsweise:
+Prefer for example:
 
 - `std::vector`
 - `std::array`
@@ -99,32 +99,32 @@ Bevorzuge beispielsweise:
 - `std::filesystem`
 - `std::chrono`
 - `std::ranges`
-- STL-Algorithmen
-- Smart Pointer
-- Lambdas
+- STL algorithms
+- smart pointers
+- lambdas
 
-### Architektur
+### Architecture
 
-Die Architektur soll **so einfach wie möglich und so strukturiert wie nötig** sein.
+The architecture should be **as simple as possible and as structured as necessary**.
 
-Vermeide:
+Avoid:
 
-- unnötige Design Patterns
-- unnötige Interfaces
-- unnötige Abstraktionsschichten
-- übermäßige Template-Komplexität
-- Deep Inheritance Hierarchies
-- unnötige Dependency Injection
-- Klassen ohne echten Mehrwert
-- unnötige Wrapper um STL-Typen
-- riesige Framework-artige Strukturen für kleine Probleme
+- unnecessary design patterns
+- unnecessary interfaces
+- unnecessary abstraction layers
+- excessive template complexity
+- deep inheritance hierarchies
+- unnecessary dependency injection
+- classes without real value
+- unnecessary wrappers around STL types
+- huge framework-like structures for small problems
 
-Führe eine Abstraktion nur dann ein, wenn sie einen **konkreten Vorteil** für Lesbarkeit, Wiederverwendung, Testbarkeit oder Wartbarkeit bringt.
+Introduce an abstraction only when it brings a **concrete benefit** for readability, reuse, testability or maintainability.
 
-### Ziel
+### Goal
 
-Der fertige Code soll aussehen, als wäre er von einem erfahrenen C++-Entwickler geschrieben worden:
+The finished code should look as if it had been written by an experienced C++ developer:
 
-**modern, kompakt, klar, typsicher, robust, wartbar und ohne unnötigen Ballast.**
+**modern, compact, clear, type-safe, robust, maintainable and free of unnecessary ballast.**
 
-Bei mehreren möglichen Lösungen ist grundsätzlich die Variante zu bevorzugen, die mit **weniger Code, weniger Dateien und weniger Abstraktionen** eine saubere und verständliche Lösung erreicht – solange Sicherheit, Wartbarkeit und Lesbarkeit erhalten bleiben.
+When several solutions are possible, prefer the one that achieves a clean and understandable result with **less code, fewer files and fewer abstractions** - as long as safety, maintainability and readability are preserved.

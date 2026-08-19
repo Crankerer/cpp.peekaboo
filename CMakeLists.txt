@@ -46,13 +46,20 @@ target_link_libraries(imgui PUBLIC glfw OpenGL::GL)
 
 add_executable(peekaboo
     src/main.cpp
+    src/overlay.cpp
     src/preview.cpp
-    src/viewer.cpp)
+    src/shell.cpp)
+set_target_properties(peekaboo PROPERTIES WIN32_EXECUTABLE TRUE)
 target_include_directories(peekaboo PRIVATE ${stb_SOURCE_DIR})
 target_link_libraries(peekaboo PRIVATE imgui glfw OpenGL::GL)
 
 if(WIN32)
-    target_link_libraries(peekaboo PRIVATE ole32 shell32)
+    target_compile_definitions(peekaboo PRIVATE UNICODE _UNICODE)
+    target_link_libraries(peekaboo PRIVATE ole32 oleaut32 shell32 uuid)
+endif()
+
+if(MSVC)  # keep int main() with the Windows subsystem
+    target_link_options(peekaboo PRIVATE /ENTRY:mainCRTStartup)
 endif()
 
 if(MSVC)

@@ -5,7 +5,6 @@
 #include <deque>
 #include <filesystem>
 #include <mutex>
-#include <optional>
 #include <stop_token>
 #include <string>
 #include <thread>
@@ -25,14 +24,16 @@ struct FileEntry {
     Kind kind{Kind::Other};
 };
 
+[[nodiscard]] FileEntry describe(const std::filesystem::path& path);
 [[nodiscard]] std::vector<FileEntry> scanDirectory(const std::filesystem::path& dir);
-[[nodiscard]] std::optional<std::filesystem::path> pickFolder();
 [[nodiscard]] std::string humanSize(std::uintmax_t bytes);
 [[nodiscard]] std::string toUtf8(const std::filesystem::path& p);
 
 struct ImageData {
     int width{};
     int height{};
+    int sourceWidth{};   // resolution before the preview was downscaled
+    int sourceHeight{};
     std::vector<std::uint8_t> rgba;  // emptied once uploaded to the GPU
 };
 

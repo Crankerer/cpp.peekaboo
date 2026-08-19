@@ -15,7 +15,6 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
-#include <shobjidl.h>
 #else
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -182,13 +181,16 @@ Content decodeImage(std::span<const std::byte> raw) {
 
     if (!pixels) return InfoData{std::format("Cannot decode image ({})", stbi_failure_reason())};
 
-    const int factor = (std::max(width, height) + kMaxImageDim - 1) / kMaxImageDim;
-    if (factor > 1) return boxDownscale(pixels.get(), width, height, factor);
-
     ImageData image;
-    image.width = width;
-    image.height = height;
-    image.rgba.assign(pixels.get(), pixels.get() + static_cast<std::size_t>(width) * height * 4);
+    if (const int factor = (std::max(width, height) + kMaxImageDim - 1) / kMaxImageDim; factor > 1) {
+        image = boxDownscale(pixels.get(), width, height, factor);
+    } else {
+        image.width = width;
+        image.height = height;
+        image.rgba.assign(pixels.get(), pixels.get() + static_cast<std::size_t>(width) * height * 4);
+    }
+    image.sourceWidth = width;
+    image.sourceHeight = height;
     return image;
 }
 
@@ -272,6 +274,19 @@ std::string humanSize(std::uintmax_t bytes) {
     return unit == 0 ? std::format("{} B", bytes) : std::format("{:.1f} {}", value, units[unit]);
 }
 
+FileEntry describe(const fs::path& path) {
+    FileEntry file;
+    file.path = path;
+    file.name = toUtf8(path.filename());
+    file.ext = lowerAscii(toUtf8(path.extension()));
+    if (!file.ext.empty()) file.ext.erase(0, 1);
+
+    std::error_code ec;
+    file.size = fs::file_size(path, ec);
+    file.kind = kindForExtension(file.ext);
+    return file;
+}
+
 std::vector<FileEntry> scanDirectory(const fs::path& dir) {
     std::vector<FileEntry> files;
     std::error_code ec;
@@ -292,36 +307,6 @@ std::vector<FileEntry> scanDirectory(const fs::path& dir) {
     std::ranges::sort(files, [](const FileEntry& a, const FileEntry& b) { return lowerAscii(a.name) < lowerAscii(b.name); });
     return files;
 }
-
-#ifdef _WIN32
-std::optional<fs::path> pickFolder() {
-    const HRESULT started = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
-    std::optional<fs::path> chosen;
-    {  // every COM object must be released before CoUninitialize
-        IFileOpenDialog* rawDialog = nullptr;
-        if (SUCCEEDED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&rawDialog)))) {
-            const std::unique_ptr<IFileOpenDialog, decltype([](IFileOpenDialog* p) { p->Release(); })> dialog{rawDialog};
-            DWORD options = 0;
-            dialog->GetOptions(&options);
-            dialog->SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM);
-
-            IShellItem* rawItem = nullptr;
-            if (SUCCEEDED(dialog->Show(nullptr)) && SUCCEEDED(dialog->GetResult(&rawItem))) {
-                const std::unique_ptr<IShellItem, decltype([](IShellItem* p) { p->Release(); })> item{rawItem};
-                PWSTR name = nullptr;
-                if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &name))) {
-                    chosen = fs::path(name);
-                    CoTaskMemFree(name);
-                }
-            }
-        }
-    }
-    if (SUCCEEDED(started)) CoUninitialize();
-    return chosen;
-}
-#else
-std::optional<fs::path> pickFolder() { return std::nullopt; }
-#endif
 
 // --- loader -----------------------------------------------------------------
 PreviewLoader::PreviewLoader(unsigned workers) {

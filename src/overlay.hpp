@@ -4,9 +4,11 @@
 #include <deque>
 #include <unordered_map>
 
+#include <imgui.h>
+
 #include "preview.hpp"
 
-struct ImFont;
+struct GLFWwindow;
 
 namespace pb {
 
@@ -15,14 +17,19 @@ struct Fonts {
     ImFont* mono = nullptr;
 };
 
-// Owns the file list, the GPU preview cache and all drawing. Everything in
-// here runs on the render thread and must stay well inside the frame budget.
-class Viewer {
+// The floating preview panel. Owns the GPU cache and drives the worker pool;
+// everything in here runs on the render thread and stays inside the frame budget.
+class Overlay {
 public:
-    Viewer(std::filesystem::path dir, std::size_t budgetBytes, Fonts fonts);
+    Overlay(GLFWwindow* window, std::size_t budgetBytes, Fonts fonts);
 
-    void frame(float dt);
-    [[nodiscard]] const std::filesystem::path& directory() const noexcept { return dir_; }
+    void show(const std::filesystem::path& file);  // opens, or switches to another file
+    void close();
+
+    [[nodiscard]] bool open() const noexcept { return open_; }
+    [[nodiscard]] const std::filesystem::path& file() const noexcept { return current_.path; }
+
+    void frame(float dt);  // build the ImGui frame; call between NewFrame and Render
 
 private:
     struct Texture {  // RAII around a GL texture name
@@ -47,22 +54,18 @@ private:
         std::uint64_t used = 0;
     };
 
-    void openDirectory(std::filesystem::path dir);
-    void handleInput();
     void pumpLoader();
-    void select(int index);
     void prefetch();
     void insert(Preview&& preview);
     void trim();
     [[nodiscard]] Entry* lookup(const FileEntry& file);
+    void placeWindow();
 
-    void drawGrid();
-    void drawTile(int index, float width, float height);
-    void drawOverlay();
-    void drawStats();
+    void drawHeader(const Entry* entry);
+    void drawContent(const Entry* entry, const ImVec2& min, const ImVec2& max, float ease);
+    void drawFooter(const Entry* entry, const ImVec2& min, const ImVec2& max, float ease);
 
-    std::filesystem::path dir_;
-    std::vector<FileEntry> files_;
+    GLFWwindow* window_;
     Fonts fonts_;
     PreviewLoader loader_;
 
@@ -72,10 +75,11 @@ private:
     std::size_t budget_;
     std::uint64_t tick_ = 0;
 
-    int selected_ = 0;
-    int columns_ = 1;
+    FileEntry current_;
+    std::filesystem::path siblingDir_;
+    std::vector<FileEntry> siblings_;  // the folder listing, for neighbour prefetch
+
     bool open_ = false;
-    bool scrollToSelection_ = true;
     float anim_ = 0.0f;
 
     std::chrono::steady_clock::time_point requestedAt_{};
@@ -83,7 +87,6 @@ private:
     double lastOpenMs_ = 0.0;
     bool lastOpenWasHit_ = false;
     std::deque<float> frameTimes_;
-    bool showStats_ = true;
 };
 
 }  // namespace pb
