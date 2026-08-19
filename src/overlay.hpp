@@ -59,7 +59,7 @@ private:
     void insert(Preview&& preview);
     void trim();
     [[nodiscard]] Entry* lookup(const FileEntry& file);
-    void placeWindow();
+    void layoutWindow();
 
     void drawHeader(const Entry* entry);
     void drawContent(const Entry* entry, const ImVec2& min, const ImVec2& max, float ease);
@@ -79,6 +79,8 @@ private:
     std::filesystem::path siblingDir_;
     std::vector<FileEntry> siblings_;  // the folder listing, for neighbour prefetch
 
+    int windowWidth_ = 0;  // current window size, so we only resize when the content asks for it
+    int windowHeight_ = 0;
     bool open_ = false;
     float anim_ = 0.0f;
 

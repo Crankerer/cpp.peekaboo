@@ -6,6 +6,8 @@
 #include <GLFW/glfw3.h>  // also provides the GL 1.1 entry points we use
 #include <GLFW/glfw3native.h>
 
+#include <dwmapi.h>
+
 #include <algorithm>
 #include <array>
 #include <cfloat>
@@ -25,10 +27,18 @@ namespace {
 
 constexpr ImU32 kText = IM_COL32(228, 230, 236, 255);
 constexpr ImU32 kMuted = IM_COL32(138, 143, 156, 255);
-constexpr ImU32 kPanel = IM_COL32(26, 27, 33, 255);
-constexpr ImU32 kBorder = IM_COL32(70, 74, 88, 255);
+constexpr ImU32 kPanel = IM_COL32(24, 25, 31, 255);  // translucent, so the acrylic blur reads through
 
-constexpr int kCornerRadius = 20;
+constexpr int kMaxWidth = 1920;  // 1080p is the upper bound for the panel
+constexpr int kMaxHeight = 1080;
+constexpr int kMinWidth = 560;
+constexpr int kMinHeight = 320;
+constexpr int kIconWidth = 520;  // nothing but an icon and a note to show
+constexpr int kIconHeight = 460;
+constexpr int kUnknownWidth = 960;  // size while the preview is still decoding
+constexpr int kUnknownHeight = 640;
+constexpr int kChromeX = 44;   // padding left and right of the content
+constexpr int kChromeY = 122;  // title, meta line, separator and footer
 constexpr int kUploadsPerFrame = 2;
 constexpr std::size_t kFrameHistory = 180;
 constexpr std::array kPrefetchOffsets{1, -1, 2, -2};
@@ -47,6 +57,14 @@ ImTextureID textureId(unsigned id) { return reinterpret_cast<ImTextureID>(static
 ImU32 fade(ImU32 color, float alpha) {
     const auto a = static_cast<ImU32>(((color >> IM_COL32_A_SHIFT) & 0xFF) * alpha);
     return (color & ~IM_COL32_A_MASK) | (a << IM_COL32_A_SHIFT);
+}
+
+// Windows 11 rounds a window for us. A window region would do it too, but that
+// opts the window out of DWM per-pixel alpha, which would cost us the blur.
+void roundCorners(HWND window) {
+    constexpr DWORD kCornerPreference = 33;
+    constexpr DWORD kRound = 2;
+    DwmSetWindowAttribute(window, kCornerPreference, &kRound, sizeof(kRound));
 }
 
 // Fits a width:height box into an area and returns its top-left corner plus size.
@@ -124,10 +142,10 @@ void Overlay::show(const fs::path& file) {
         siblings_ = scanDirectory(parent);
     }
     prefetch();
+    layoutWindow();
 
     if (!open_) {
         open_ = true;
-        placeWindow();
         glfwShowWindow(window_);
     }
 }
@@ -138,7 +156,8 @@ void Overlay::close() {
     glfwHideWindow(window_);
 }
 
-void Overlay::placeWindow() {
+// Sizes the panel to whatever it has to show, centred on the active monitor.
+void Overlay::layoutWindow() {
     HMONITOR monitor = MonitorFromWindow(GetForegroundWindow(), MONITOR_DEFAULTTONEAREST);
     MONITORINFO info{};
     info.cbSize = sizeof(info);
@@ -146,15 +165,39 @@ void Overlay::placeWindow() {
 
     const int areaWidth = info.rcWork.right - info.rcWork.left;
     const int areaHeight = info.rcWork.bottom - info.rcWork.top;
-    const int width = std::max(760, static_cast<int>(areaWidth * 0.66));
-    const int height = std::max(560, static_cast<int>(areaHeight * 0.74));
+    const int maxWidth = std::min(kMaxWidth, areaWidth - 80);
+    const int maxHeight = std::min(kMaxHeight, areaHeight - 80);
+
+    int width = maxWidth;
+    int height = maxHeight;
+
+    const Entry* entry = lookup(current_);
+    if (!entry) {  // nothing decoded yet, avoid a jarring resize once it lands
+        width = std::min(kUnknownWidth, maxWidth);
+        height = std::min(kUnknownHeight, maxHeight);
+    } else if (const auto* image = entry ? std::get_if<ImageData>(&entry->preview.content) : nullptr;
+        image && entry->texture.valid()) {  // an image gets a window that hugs it, never scaled up
+        const float scale = std::min({1.0f, static_cast<float>(maxWidth - kChromeX) / entry->texture.width,
+                                      static_cast<float>(maxHeight - kChromeY) / entry->texture.height});
+        width = std::clamp(static_cast<int>(entry->texture.width * scale) + kChromeX, kMinWidth, maxWidth);
+        height = std::clamp(static_cast<int>(entry->texture.height * scale) + kChromeY, kMinHeight, maxHeight);
+    } else if (entry && std::holds_alternative<InfoData>(entry->preview.content)) {
+        width = std::min(kIconWidth, maxWidth);  // just an icon and a note
+        height = std::min(kIconHeight, maxHeight);
+    }
+
+    if (width == windowWidth_ && height == windowHeight_) return;
+    windowWidth_ = width;
+    windowHeight_ = height;
 
     glfwSetWindowSize(window_, width, height);
     glfwSetWindowPos(window_, info.rcWork.left + (areaWidth - width) / 2, info.rcWork.top + (areaHeight - height) / 2);
 
-    // Rounded corners cut out of the window itself - an opaque window keeps us
-    // independent of whether the compositor grants us a transparent framebuffer.
-    SetWindowRgn(glfwGetWin32Window(window_), CreateRoundRectRgn(0, 0, width + 1, height + 1, kCornerRadius, kCornerRadius), TRUE);
+    // The only source of rounding: corners are cut out of the window itself, so
+    // there is no second radius to disagree with. CreateRoundRectRgn wants the
+    // ellipse diameter, not the radius.
+    HWND native = glfwGetWin32Window(window_);
+    roundCorners(native);
 }
 
 // --- cache ------------------------------------------------------------------
@@ -171,7 +214,12 @@ void Overlay::insert(Preview&& preview) {
 
     Entry entry;
     entry.used = ++tick_;
-    if (auto* image = std::get_if<ImageData>(&preview.content); image && !image->rgba.empty()) {
+
+    auto* image = std::get_if<ImageData>(&preview.content);
+    if (!image) {
+        if (auto* info = std::get_if<InfoData>(&preview.content)) image = &info->icon;
+    }
+    if (image && !image->rgba.empty()) {
         entry.texture = Texture(*image);
         image->rgba = {};  // the pixels live on the GPU now
     }
@@ -234,6 +282,7 @@ void Overlay::frame(float dt) {
     if (frameTimes_.size() > kFrameHistory) frameTimes_.pop_front();
 
     pumpLoader();
+    layoutWindow();  // a preview that was not prefetched only reveals its size now
 
     anim_ += (1.0f - anim_) * (1.0f - std::exp(-dt * 22.0f));  // close() resets it, so this only ever fades in
     if (anim_ > 0.998f) anim_ = 1.0f;
@@ -251,9 +300,7 @@ void Overlay::frame(float dt) {
                  ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBackground |
                      ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing);
 
-    ImDrawList* draw = ImGui::GetWindowDrawList();
-    draw->AddRectFilled(pos, pos + size, kPanel);
-    draw->AddRect(pos + ImVec2(1.0f, 1.0f), pos + size - ImVec2(1.0f, 1.0f), kBorder, kCornerRadius, 0, 1.5f);
+    ImGui::GetWindowDrawList()->AddRectFilled(pos, pos + size, kPanel);
 
     const Entry* entry = lookup(current_);
     drawHeader(entry);
@@ -328,14 +375,27 @@ void Overlay::drawContent(const Entry* entry, const ImVec2& min, const ImVec2& m
         return;
     }
 
-    const ImVec2 badgeMin((min.x + max.x) * 0.5f - 60.0f, (min.y + max.y) * 0.5f - 80.0f);
-    const ImVec2 badgeMax(badgeMin.x + 120.0f, badgeMin.y + 120.0f);
-    draw->AddRectFilled(badgeMin, badgeMax, fade(kindColor(current_.kind), ease), 12.0f);
-    centeredText(ImGui::GetFont(), 24.0f, badgeMin, badgeMax, badgeMin.y + 46.0f, fade(kText, ease),
-                 current_.ext.empty() ? "FILE" : current_.ext);
+    const ImVec2 centre((min.x + max.x) * 0.5f, (min.y + max.y) * 0.5f - 40.0f);
+    float noteY = 0.0f;
+
+    if (entry->texture.valid()) {  // whatever Explorer shows for this file
+        const float side = std::min({256.0f, (max.x - min.x) * 0.6f, (max.y - min.y) * 0.5f});
+        const float scale = side / static_cast<float>(std::max(entry->texture.width, entry->texture.height));
+        const ImVec2 half(entry->texture.width * scale * 0.5f, entry->texture.height * scale * 0.5f);
+        draw->AddImage(textureId(entry->texture.id), centre - half, centre + half, ImVec2(0, 0), ImVec2(1, 1),
+                       fade(IM_COL32_WHITE, ease));
+        noteY = centre.y + half.y + 28.0f;
+    } else {
+        const ImVec2 badgeMin(centre.x - 60.0f, centre.y - 60.0f);
+        const ImVec2 badgeMax(centre.x + 60.0f, centre.y + 60.0f);
+        draw->AddRectFilled(badgeMin, badgeMax, fade(kindColor(current_.kind), ease), 12.0f);
+        centeredText(ImGui::GetFont(), 24.0f, badgeMin, badgeMax, badgeMin.y + 46.0f, fade(kText, ease),
+                     current_.ext.empty() ? "FILE" : current_.ext);
+        noteY = badgeMax.y + 24.0f;
+    }
 
     const auto* info = std::get_if<InfoData>(&entry->preview.content);
-    centeredText(ImGui::GetFont(), 16.0f, min, max, badgeMax.y + 20.0f, fade(kMuted, ease),
+    centeredText(ImGui::GetFont(), 17.0f, min, max, noteY, fade(kMuted, ease),
                  info ? info->note : std::string{"No preview available"});
 }
 
@@ -350,7 +410,7 @@ void Overlay::drawFooter(const Entry* entry, const ImVec2& min, const ImVec2& ma
                     lastOpenMs_, lastOpenWasHit_ ? "prefetched" : "decoded", average > 0.0f ? 1000.0f / average : 0.0f,
                     humanSize(cacheBytes_), humanSize(budget_), text && text->truncated ? "     truncated at 1 MiB" : "");
 
-    centeredText(ImGui::GetFont(), 13.0f, min, max, max.y + 8.0f, fade(kMuted, ease), footer);
+    centeredText(ImGui::GetFont(), 16.0f, min, max, max.y + 6.0f, fade(kMuted, ease), footer);
 }
 
 }  // namespace pb

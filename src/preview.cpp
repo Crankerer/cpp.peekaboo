@@ -15,6 +15,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <shobjidl.h>
 #else
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -49,6 +50,7 @@ namespace {
 constexpr std::size_t kTextLimit = 1u << 20;  // read at most 1 MiB of text
 constexpr std::size_t kSniffLimit = 4096;
 constexpr std::size_t kBlobLimit = 64u << 20;
+constexpr int kIconSize = 256;
 constexpr int kMaxImageDim = 2048;  // decoded previews are capped to keep GPU uploads cheap
 constexpr std::size_t kMaxQueued = 24;
 
@@ -116,6 +118,74 @@ MappedFile::~MappedFile() {
 }
 #endif
 
+// --- shell icons ------------------------------------------------------------
+struct ComScope {  // the shell image APIs need COM on the calling thread
+    ComScope() { CoInitializeEx(nullptr, COINIT_MULTITHREADED); }
+    ~ComScope() { CoUninitialize(); }
+    ComScope(const ComScope&) = delete;
+    ComScope& operator=(const ComScope&) = delete;
+};
+
+template <class T>
+using ComPtr = std::unique_ptr<T, decltype([](T* p) { p->Release(); })>;
+
+// GetDIBits hands us premultiplied BGRA, OpenGL and ImGui want straight RGBA.
+void toStraightRgba(std::vector<std::uint8_t>& pixels) {
+    bool anyAlpha = false;
+    for (std::size_t i = 0; i < pixels.size(); i += 4) {
+        std::swap(pixels[i], pixels[i + 2]);
+        if (const std::uint8_t alpha = pixels[i + 3]; alpha != 0) {
+            anyAlpha = true;
+            for (int c = 0; c < 3; ++c) pixels[i + c] = static_cast<std::uint8_t>(std::min(255, pixels[i + c] * 255 / alpha));
+        }
+    }
+    if (anyAlpha) return;
+    for (std::size_t i = 3; i < pixels.size(); i += 4) pixels[i] = 255;  // 24 bit source, no alpha at all
+}
+
+ImageData shellIcon(const fs::path& path, int side) {
+    IShellItem* rawItem = nullptr;
+    if (FAILED(SHCreateItemFromParsingName(path.c_str(), nullptr, IID_PPV_ARGS(&rawItem)))) return {};
+    const ComPtr<IShellItem> item{rawItem};
+
+    IShellItemImageFactory* rawFactory = nullptr;
+    if (FAILED(item->QueryInterface(IID_PPV_ARGS(&rawFactory)))) return {};
+    const ComPtr<IShellItemImageFactory> factory{rawFactory};
+
+    HBITMAP bitmap = nullptr;
+    if (FAILED(factory->GetImage(SIZE{side, side}, SIIGBF_BIGGERSIZEOK, &bitmap))) return {};
+
+    BITMAP described{};
+    if (GetObjectW(bitmap, sizeof(described), &described) == 0) {
+        DeleteObject(bitmap);
+        return {};
+    }
+
+    BITMAPINFO request{};
+    request.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    request.bmiHeader.biWidth = described.bmWidth;
+    request.bmiHeader.biHeight = -described.bmHeight;  // negative: top-down
+    request.bmiHeader.biPlanes = 1;
+    request.bmiHeader.biBitCount = 32;
+    request.bmiHeader.biCompression = BI_RGB;
+
+    ImageData icon;
+    icon.width = described.bmWidth;
+    icon.height = described.bmHeight;
+    icon.sourceWidth = icon.width;
+    icon.sourceHeight = icon.height;
+    icon.rgba.resize(static_cast<std::size_t>(icon.width) * icon.height * 4);
+
+    HDC screen = GetDC(nullptr);
+    const int copied = GetDIBits(screen, bitmap, 0, described.bmHeight, icon.rgba.data(), &request, DIB_RGB_COLORS);
+    ReleaseDC(nullptr, screen);
+    DeleteObject(bitmap);
+
+    if (copied == 0) return {};
+    toStraightRgba(icon.rgba);
+    return icon;
+}
+
 // --- classification ---------------------------------------------------------
 std::string lowerAscii(std::string s) {
     std::ranges::transform(s, s.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
@@ -148,6 +218,10 @@ bool looksLikeText(std::span<const std::byte> raw) {
 }
 
 // --- decoding ---------------------------------------------------------------
+InfoData fallback(const FileEntry& file, std::string note) {
+    return InfoData{std::move(note), shellIcon(file.path, kIconSize)};
+}
+
 ImageData boxDownscale(const std::uint8_t* src, int width, int height, int factor) {
     ImageData out;
     out.width = width / factor;
@@ -172,14 +246,14 @@ ImageData boxDownscale(const std::uint8_t* src, int width, int height, int facto
     return out;
 }
 
-Content decodeImage(std::span<const std::byte> raw) {
+Content decodeImage(const FileEntry& file, std::span<const std::byte> raw) {
     int width = 0;
     int height = 0;
     int channels = 0;
     const std::unique_ptr<stbi_uc, decltype([](stbi_uc* p) { stbi_image_free(p); })> pixels{stbi_load_from_memory(
         reinterpret_cast<const stbi_uc*>(raw.data()), static_cast<int>(raw.size()), &width, &height, &channels, 4)};
 
-    if (!pixels) return InfoData{std::format("Cannot decode image ({})", stbi_failure_reason())};
+    if (!pixels) return fallback(file, std::format("Cannot decode image ({})", stbi_failure_reason()));
 
     ImageData image;
     if (const int factor = (std::max(width, height) + kMaxImageDim - 1) / kMaxImageDim; factor > 1) {
@@ -222,26 +296,28 @@ Content decodeText(std::span<const std::byte> raw) {
 }
 
 Content loadContent(const FileEntry& file) {
-    if (file.size == 0) return InfoData{"Empty file"};
-    if (file.ext == "webp") return InfoData{"WebP is not supported by stb_image"};
-    if (file.kind == Kind::Other && file.size > kBlobLimit) return InfoData{"No preview available"};
+    if (file.size == 0) return fallback(file, "Empty file");
+    if (file.ext == "webp") return fallback(file, "WebP is not supported by stb_image");
+    if (file.kind == Kind::Other && file.size > kBlobLimit) return fallback(file, "No preview available");
 
     const MappedFile mapped(file.path);
-    if (!mapped.valid()) return InfoData{"File could not be opened"};
+    if (!mapped.valid()) return fallback(file, "File could not be opened");
 
     const auto raw = mapped.bytes();
     if (raw.size() > static_cast<std::size_t>(std::numeric_limits<int>::max()))
-        return InfoData{"File too large to preview"};
+        return fallback(file, "File too large to preview");
 
-    if (file.kind == Kind::Image) return decodeImage(raw);
+    if (file.kind == Kind::Image) return decodeImage(file, raw);
     if (file.kind == Kind::Text || looksLikeText(raw)) return decodeText(raw);
-    return InfoData{"No preview available"};
+    return fallback(file, "No preview available");
 }
 
 std::size_t footprint(const Content& content) {
     if (const auto* image = std::get_if<ImageData>(&content))
         return static_cast<std::size_t>(image->width) * image->height * 4;
     if (const auto* text = std::get_if<TextData>(&content)) return text->text.size() + text->lines.size() * 4;
+    if (const auto* info = std::get_if<InfoData>(&content))
+        return 256 + static_cast<std::size_t>(info->icon.width) * info->icon.height * 4;
     return 256;
 }
 
@@ -350,6 +426,8 @@ std::size_t PreviewLoader::pending() const {
 }
 
 void PreviewLoader::run(std::stop_token stop) {
+    const ComScope com;  // shell icon extraction happens on this thread
+
     while (true) {
         FileEntry job;
         {

@@ -55,7 +55,7 @@ target_link_libraries(peekaboo PRIVATE imgui glfw OpenGL::GL)
 
 if(WIN32)
     target_compile_definitions(peekaboo PRIVATE UNICODE _UNICODE)
-    target_link_libraries(peekaboo PRIVATE ole32 oleaut32 shell32 uuid)
+    target_link_libraries(peekaboo PRIVATE dwmapi ole32 oleaut32 shell32 uuid winmm)
 endif()
 
 if(MSVC)  # keep int main() with the Windows subsystem

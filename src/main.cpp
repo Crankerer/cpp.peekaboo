@@ -7,11 +7,13 @@
 #include <GLFW/glfw3native.h>
 
 #include <shellapi.h>
+#include <timeapi.h>
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cwchar>
+#include <thread>
 #include <filesystem>
 
 #include "overlay.hpp"
@@ -20,6 +22,9 @@
 namespace {
 
 constexpr std::size_t kBudgetBytes = 512u << 20;
+// A preview panel is static apart from a short fade, so it has no business
+// burning a high refresh display's worth of frames.
+constexpr auto kFrameBudget = std::chrono::microseconds(1'000'000 / 60);
 constexpr UINT kTrayMessage = WM_APP + 1;
 constexpr UINT kTrayExit = 1;
 
@@ -110,7 +115,7 @@ void applyStyle() {
     style.ChildRounding = 8.0f;
     style.ScrollbarRounding = 8.0f;
     style.ScrollbarSize = 12.0f;
-    style.Colors[ImGuiCol_ChildBg] = ImVec4(0.07f, 0.075f, 0.09f, 1.0f);
+    style.Colors[ImGuiCol_ChildBg] = ImVec4(0.07f, 0.075f, 0.09f, 0.78f);
     style.Colors[ImGuiCol_Separator] = ImVec4(0.24f, 0.25f, 0.29f, 1.0f);
 }
 
@@ -145,12 +150,17 @@ GLFWwindow* createOverlayWindow() {
     HWND native = glfwGetWin32Window(window);
     SetWindowLongPtrW(native, GWL_EXSTYLE,
                       GetWindowLongPtrW(native, GWL_EXSTYLE) | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE);
+    SetWindowPos(native, nullptr, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
     return window;
 }
 
 }  // namespace
 
 int main() {
+    // Without this, sleep_until rounds up to the 15.6 ms scheduler tick and the
+    // frame cap lands nowhere near its target.
+    timeBeginPeriod(1);
     if (!pb::shell::initialize()) return fail(L"COM could not be initialised.");
     if (!glfwInit()) return fail(L"GLFW could not be initialised.");
 
@@ -158,7 +168,7 @@ int main() {
     if (!window) return fail(L"The preview window could not be created.");
 
     glfwMakeContextCurrent(window);
-    glfwSwapInterval(1);
+    glfwSwapInterval(0);  // the frame limiter below sets the pace, not the display
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -179,6 +189,8 @@ int main() {
         auto previous = std::chrono::steady_clock::now();
 
         while (!glfwWindowShouldClose(window)) {
+            const auto frameStart = std::chrono::steady_clock::now();
+
             if (overlay.open())
                 glfwPollEvents();
             else
@@ -216,10 +228,11 @@ int main() {
             int height = 0;
             glfwGetFramebufferSize(window, &width, &height);
             glViewport(0, 0, width, height);
-            glClearColor(0.102f, 0.106f, 0.129f, 1.0f);
+            glClearColor(0.094f, 0.098f, 0.121f, 1.0f);
             glClear(GL_COLOR_BUFFER_BIT);
             ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
             glfwSwapBuffers(window);
+            std::this_thread::sleep_until(frameStart + kFrameBudget);
         }
     }  // the overlay must release its textures while the context is still alive
 
@@ -233,5 +246,6 @@ int main() {
     glfwDestroyWindow(window);
     glfwTerminate();
     pb::shell::shutdown();
+    timeEndPeriod(1);
     return 0;
 }

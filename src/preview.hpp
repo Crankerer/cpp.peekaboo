@@ -45,6 +45,7 @@ struct TextData {
 
 struct InfoData {  // fallback for everything we cannot render
     std::string note;
+    ImageData icon;  // whatever the shell shows for this file, empty if it has nothing
 };
 
 using Content = std::variant<ImageData, TextData, InfoData>;
