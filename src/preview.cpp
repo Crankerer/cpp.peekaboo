@@ -16,6 +16,7 @@
 #endif
 #include <windows.h>
 #include <shobjidl.h>
+#include <shlwapi.h>
 #else
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -334,6 +335,21 @@ Preview decode(const FileEntry& file) {
 }  // namespace
 
 // --- helpers ----------------------------------------------------------------
+namespace {
+
+std::string defaultApplication(const fs::path& path) {
+    const std::wstring extension = path.extension().native();
+    if (extension.empty()) return {};
+
+    wchar_t name[256]{};
+    auto size = static_cast<DWORD>(std::size(name));
+    if (FAILED(AssocQueryStringW(ASSOCF_NONE, ASSOCSTR_FRIENDLYAPPNAME, extension.c_str(), nullptr, name, &size)))
+        return {};
+    return toUtf8(fs::path(name));
+}
+
+}  // namespace
+
 std::string toUtf8(const fs::path& path) {
     const auto utf8 = path.u8string();
     return std::string(reinterpret_cast<const char*>(utf8.data()), utf8.size());
@@ -360,6 +376,7 @@ FileEntry describe(const fs::path& path) {
     std::error_code ec;
     file.size = fs::file_size(path, ec);
     file.kind = kindForExtension(file.ext);
+    file.opensWith = defaultApplication(path);
     return file;
 }
 

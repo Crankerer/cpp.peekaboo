@@ -7,6 +7,7 @@
 #include <GLFW/glfw3native.h>
 
 #include <dwmapi.h>
+#include <shellapi.h>
 
 #include <algorithm>
 #include <array>
@@ -29,15 +30,18 @@ constexpr ImU32 kText = IM_COL32(228, 230, 236, 255);
 constexpr ImU32 kMuted = IM_COL32(138, 143, 156, 255);
 constexpr ImU32 kPanelTint = IM_COL32(20, 21, 27, 178);  // darkens the backdrop so text stays readable
 
-constexpr int kMaxWidth = 1920;  // 1080p is the upper bound for the panel
-constexpr int kMaxHeight = 1080;
+constexpr int kMaxWidth = 1366;  // 768p is the upper bound for the panel
+constexpr int kMaxHeight = 768;
 constexpr int kMinWidth = 560;
 constexpr int kMinHeight = 320;
 constexpr int kIconWidth = 520;  // nothing but an icon and a note to show
 constexpr int kIconHeight = 460;
 constexpr int kUnknownWidth = 960;  // size while the preview is still decoding
 constexpr int kUnknownHeight = 640;
-constexpr int kBlurDivisor = 8;  // how hard the snapshot is shrunk, which is the blur radius
+constexpr int kBlurDivisor = 8;
+constexpr float kButtonRounding = 8.0f;  // matches the radius Windows 11 rounds the window with
+constexpr ImU32 kButton = IM_COL32(58, 62, 76, 235);
+constexpr ImU32 kButtonHover = IM_COL32(78, 84, 102, 245);  // how hard the snapshot is shrunk, which is the blur radius
 constexpr int kChromeX = 44;   // padding left and right of the content
 constexpr int kChromeY = 122;  // title, meta line, separator and footer
 constexpr int kUploadsPerFrame = 2;
@@ -111,6 +115,15 @@ void roundCorners(HWND window) {
     constexpr DWORD kCornerPreference = 33;
     constexpr DWORD kRound = 2;
     DwmSetWindowAttribute(window, kCornerPreference, &kRound, sizeof(kRound));
+}
+
+std::string ellipsize(const std::string& text, ImFont* font, float size, float maxWidth) {
+    if (font->CalcTextSizeA(size, FLT_MAX, 0.0f, text.c_str()).x <= maxWidth) return text;
+
+    const float dots = font->CalcTextSizeA(size, FLT_MAX, 0.0f, "...").x;
+    const char* remaining = nullptr;
+    font->CalcTextSizeA(size, std::max(0.0f, maxWidth - dots), 0.0f, text.c_str(), nullptr, &remaining);
+    return std::string(text.c_str(), remaining) + "...";
 }
 
 // Fits a width:height box into an area and returns its top-left corner plus size.
@@ -376,7 +389,7 @@ void Overlay::frame(float dt) {
     background->AddRectFilled(pos, pos + size, kPanelTint);
 
     const Entry* entry = lookup(current_);
-    drawHeader(entry);
+    drawHeader(entry, drawOpenWith(pos, pos + size));
 
     const ImVec2 contentMin = ImGui::GetCursorScreenPos();
     const ImVec2 contentMax(pos.x + size.x - 22.0f, pos.y + size.y - 44.0f);
@@ -392,9 +405,43 @@ void Overlay::frame(float dt) {
     ImGui::PopStyleVar(2);
 }
 
-void Overlay::drawHeader(const Entry* entry) {
+// Top right: hands the file to whatever application owns its type. Returns the
+// x the title has to stop at, so a long name never runs into the button.
+float Overlay::drawOpenWith(const ImVec2& panelMin, const ImVec2& panelMax) {
+    const float edge = panelMax.x - 22.0f;
+    if (current_.opensWith.empty()) return edge;
+
+    ImFont* font = fonts_.ui ? fonts_.ui : ImGui::GetFont();
+    const float textSize = font->FontSize;
+    const std::string label = "Open with " + current_.opensWith;
+    const float width = font->CalcTextSizeA(textSize, FLT_MAX, 0.0f, label.c_str()).x + 26.0f;
+    const float height = textSize + 14.0f;
+
+    const ImVec2 min(edge - width, panelMin.y + 12.0f);
+    const ImVec2 max(min.x + width, min.y + height);
+
+    const ImVec2 cursor = ImGui::GetCursorScreenPos();
+    ImGui::SetCursorScreenPos(min);
+    ImGui::InvisibleButton("##openwith", ImVec2(width, height));
+    const bool hovered = ImGui::IsItemHovered();
+    if (ImGui::IsItemClicked()) {
+        ShellExecuteW(nullptr, L"open", current_.path.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        close();
+    }
+    ImGui::SetCursorScreenPos(cursor);
+
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    draw->AddRectFilled(min, max, hovered ? kButtonHover : kButton, kButtonRounding);
+    draw->AddText(font, textSize, ImVec2(min.x + 13.0f, min.y + (height - textSize) * 0.5f), kText, label.c_str());
+
+    return min.x - 16.0f;
+}
+
+void Overlay::drawHeader(const Entry* entry, float titleLimit) {
     if (fonts_.ui) ImGui::PushFont(fonts_.ui);
-    ImGui::TextUnformatted(current_.name.c_str());
+    ImGui::TextUnformatted(
+        ellipsize(current_.name, ImGui::GetFont(), ImGui::GetFontSize(), titleLimit - ImGui::GetCursorScreenPos().x)
+            .c_str());
     if (fonts_.ui) ImGui::PopFont();
 
     std::string meta = std::format("{}   {}", current_.ext.empty() ? "file" : current_.ext, humanSize(current_.size));

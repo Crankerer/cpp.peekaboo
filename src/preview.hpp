@@ -19,7 +19,8 @@ enum class Kind { Image, Text, Other };
 struct FileEntry {
     std::filesystem::path path;
     std::string name;  // UTF-8, for display
-    std::string ext;   // lower case, without dot
+    std::string ext;        // lower case, without dot
+    std::string opensWith;  // friendly name of the application registered for this type
     std::uintmax_t size{};
     Kind kind{Kind::Other};
 };

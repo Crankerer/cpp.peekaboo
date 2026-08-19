@@ -62,7 +62,8 @@ private:
     void layoutWindow();
     void captureBackdrop();
 
-    void drawHeader(const Entry* entry);
+    void drawHeader(const Entry* entry, float titleLimit);
+    [[nodiscard]] float drawOpenWith(const ImVec2& panelMin, const ImVec2& panelMax);
     void drawContent(const Entry* entry, const ImVec2& min, const ImVec2& max, float ease);
     void drawFooter(const Entry* entry, const ImVec2& min, const ImVec2& max, float ease);
 
