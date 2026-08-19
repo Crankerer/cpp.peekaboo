@@ -228,7 +228,7 @@ int main() {
             int height = 0;
             glfwGetFramebufferSize(window, &width, &height);
             glViewport(0, 0, width, height);
-            glClearColor(0.094f, 0.098f, 0.121f, 1.0f);
+            glClearColor(0.078f, 0.082f, 0.106f, 1.0f);
             glClear(GL_COLOR_BUFFER_BIT);
             ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
             glfwSwapBuffers(window);

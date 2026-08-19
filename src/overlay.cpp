@@ -27,7 +27,7 @@ namespace {
 
 constexpr ImU32 kText = IM_COL32(228, 230, 236, 255);
 constexpr ImU32 kMuted = IM_COL32(138, 143, 156, 255);
-constexpr ImU32 kPanel = IM_COL32(24, 25, 31, 255);  // translucent, so the acrylic blur reads through
+constexpr ImU32 kPanelTint = IM_COL32(20, 21, 27, 178);  // darkens the backdrop so text stays readable
 
 constexpr int kMaxWidth = 1920;  // 1080p is the upper bound for the panel
 constexpr int kMaxHeight = 1080;
@@ -37,6 +37,7 @@ constexpr int kIconWidth = 520;  // nothing but an icon and a note to show
 constexpr int kIconHeight = 460;
 constexpr int kUnknownWidth = 960;  // size while the preview is still decoding
 constexpr int kUnknownHeight = 640;
+constexpr int kBlurDivisor = 8;  // how hard the snapshot is shrunk, which is the blur radius
 constexpr int kChromeX = 44;   // padding left and right of the content
 constexpr int kChromeY = 122;  // title, meta line, separator and footer
 constexpr int kUploadsPerFrame = 2;
@@ -57,6 +58,51 @@ ImTextureID textureId(unsigned id) { return reinterpret_cast<ImTextureID>(static
 ImU32 fade(ImU32 color, float alpha) {
     const auto a = static_cast<ImU32>(((color >> IM_COL32_A_SHIFT) & 0xFF) * alpha);
     return (color & ~IM_COL32_A_MASK) | (a << IM_COL32_A_SHIFT);
+}
+
+// Windows composites this OpenGL window opaquely - it ignores our alpha channel,
+// so neither DwmEnableBlurBehindWindow nor the accent policy ever reaches us.
+// We build the frosted backdrop ourselves: grab the screen while the panel is
+// still hidden and shrink it hard, which is exactly a box blur. Stretching it
+// back up adds the smoothing.
+ImageData grabScreen(int left, int top, int areaWidth, int areaHeight, int divisor) {
+    const int width = std::max(1, areaWidth / divisor);
+    const int height = std::max(1, areaHeight / divisor);
+
+    HDC screen = GetDC(nullptr);
+    HDC memory = CreateCompatibleDC(screen);
+    HBITMAP bitmap = CreateCompatibleBitmap(screen, width, height);
+    HGDIOBJ previous = SelectObject(memory, bitmap);
+
+    SetStretchBltMode(memory, HALFTONE);  // averages the dropped pixels instead of picking one
+    SetBrushOrgEx(memory, 0, 0, nullptr);
+    StretchBlt(memory, 0, 0, width, height, screen, left, top, areaWidth, areaHeight, SRCCOPY);
+
+    BITMAPINFO request{};
+    request.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    request.bmiHeader.biWidth = width;
+    request.bmiHeader.biHeight = -height;  // negative: top-down
+    request.bmiHeader.biPlanes = 1;
+    request.bmiHeader.biBitCount = 32;
+    request.bmiHeader.biCompression = BI_RGB;
+
+    ImageData shot;
+    shot.width = width;
+    shot.height = height;
+    shot.rgba.resize(static_cast<std::size_t>(width) * height * 4);
+    const int copied = GetDIBits(memory, bitmap, 0, height, shot.rgba.data(), &request, DIB_RGB_COLORS);
+
+    SelectObject(memory, previous);
+    DeleteObject(bitmap);
+    DeleteDC(memory);
+    ReleaseDC(nullptr, screen);
+
+    if (copied == 0) return {};
+    for (std::size_t i = 0; i < shot.rgba.size(); i += 4) {  // GDI hands out BGRX
+        std::swap(shot.rgba[i], shot.rgba[i + 2]);
+        shot.rgba[i + 3] = 255;
+    }
+    return shot;
 }
 
 // Windows 11 rounds a window for us. A window region would do it too, but that
@@ -145,6 +191,7 @@ void Overlay::show(const fs::path& file) {
     layoutWindow();
 
     if (!open_) {
+        captureBackdrop();  // while the window is still hidden, or we would grab ourselves
         open_ = true;
         glfwShowWindow(window_);
     }
@@ -190,14 +237,33 @@ void Overlay::layoutWindow() {
     windowWidth_ = width;
     windowHeight_ = height;
 
+    windowX_ = info.rcWork.left + (areaWidth - width) / 2;
+    windowY_ = info.rcWork.top + (areaHeight - height) / 2;
     glfwSetWindowSize(window_, width, height);
-    glfwSetWindowPos(window_, info.rcWork.left + (areaWidth - width) / 2, info.rcWork.top + (areaHeight - height) / 2);
+    glfwSetWindowPos(window_, windowX_, windowY_);
 
     // The only source of rounding: corners are cut out of the window itself, so
     // there is no second radius to disagree with. CreateRoundRectRgn wants the
     // ellipse diameter, not the radius.
     HWND native = glfwGetWin32Window(window_);
     roundCorners(native);
+}
+
+// Snapshots the whole monitor, so browsing on with the arrow keys can reuse it:
+// the panel simply samples the part it happens to cover.
+void Overlay::captureBackdrop() {
+    HMONITOR monitor = MonitorFromWindow(GetForegroundWindow(), MONITOR_DEFAULTTONEAREST);
+    MONITORINFO info{};
+    info.cbSize = sizeof(info);
+    if (!GetMonitorInfoW(monitor, &info)) return;
+
+    const int width = info.rcMonitor.right - info.rcMonitor.left;
+    const int height = info.rcMonitor.bottom - info.rcMonitor.top;
+    backdropOrigin_ = ImVec2(static_cast<float>(info.rcMonitor.left), static_cast<float>(info.rcMonitor.top));
+    backdropSize_ = ImVec2(static_cast<float>(width), static_cast<float>(height));
+
+    const ImageData shot = grabScreen(info.rcMonitor.left, info.rcMonitor.top, width, height, kBlurDivisor);
+    backdrop_ = shot.rgba.empty() ? Texture{} : Texture(shot);
 }
 
 // --- cache ------------------------------------------------------------------
@@ -300,7 +366,14 @@ void Overlay::frame(float dt) {
                  ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBackground |
                      ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing);
 
-    ImGui::GetWindowDrawList()->AddRectFilled(pos, pos + size, kPanel);
+    ImDrawList* background = ImGui::GetWindowDrawList();
+    if (backdrop_.valid()) {
+        const ImVec2 uvMin((windowX_ - backdropOrigin_.x) / backdropSize_.x,
+                           (windowY_ - backdropOrigin_.y) / backdropSize_.y);
+        const ImVec2 uvMax(uvMin.x + windowWidth_ / backdropSize_.x, uvMin.y + windowHeight_ / backdropSize_.y);
+        background->AddImage(textureId(backdrop_.id), pos, pos + size, uvMin, uvMax);
+    }
+    background->AddRectFilled(pos, pos + size, kPanelTint);
 
     const Entry* entry = lookup(current_);
     drawHeader(entry);

@@ -60,6 +60,7 @@ private:
     void trim();
     [[nodiscard]] Entry* lookup(const FileEntry& file);
     void layoutWindow();
+    void captureBackdrop();
 
     void drawHeader(const Entry* entry);
     void drawContent(const Entry* entry, const ImVec2& min, const ImVec2& max, float ease);
@@ -79,7 +80,12 @@ private:
     std::filesystem::path siblingDir_;
     std::vector<FileEntry> siblings_;  // the folder listing, for neighbour prefetch
 
-    int windowWidth_ = 0;  // current window size, so we only resize when the content asks for it
+    Texture backdrop_;        // blurred snapshot of whatever is behind the panel
+    ImVec2 backdropOrigin_{};  // screen region that snapshot covers
+    ImVec2 backdropSize_{};
+    int windowX_ = 0;  // window rectangle in screen coordinates
+    int windowY_ = 0;
+    int windowWidth_ = 0;
     int windowHeight_ = 0;
     bool open_ = false;
     float anim_ = 0.0f;

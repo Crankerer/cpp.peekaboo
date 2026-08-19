@@ -37,21 +37,21 @@ the original macOS shortcut makes.
 | --- | --- |
 | `png` `jpg` `bmp` `gif` `tga` `psd` `hdr` `ppm` `pgm` | decoded with stb_image, uploaded as a GPU texture |
 | `txt` `md` and ~40 code/config extensions | monospace text, virtualised so only visible lines cost anything |
-| anything else | fallback card with type badge, name, size and the reason |
+| anything else | whatever the shell itself shows for the file, plus name, size and the reason |
 
 Files without a known extension are sniffed: if the first 4 KB look like text, they are rendered
-as text. `webp` is detected but not decodable - stb_image has no WebP support, so it shows the
-fallback card with that reason. PDF rendering would need a third-party library and is not
-included.
+as text. The fallback asks the shell through `IShellItemImageFactory`, so PDFs, videos and Office
+documents get the same thumbnail Explorer would show, and everything else gets its file type icon.
+`webp` is detected but not decodable - stb_image has no WebP support - and says so.
 
 ## Performance design
 
-The whole point of the exercise. Opening a preview costs **well under a millisecond** when the
+The whole point of the exercise. Opening a preview costs **a couple of milliseconds** when the
 file was prefetched, which is the normal case while browsing with the arrow keys.
 
 - **Nothing decodes on the render thread.** A `std::jthread` worker pool (cores - 1) does all
-  file I/O and decoding. Results are handed back through a queue and picked up by the render
-  thread, which is the only thread that ever touches OpenGL.
+  file I/O, decoding and shell icon extraction. Results are handed back through a queue and
+  picked up by the render thread, which is the only thread that ever touches OpenGL.
 - **Prefetching.** On every selection change the two neighbours in each direction are queued at
   low priority; the selected file jumps the queue. Stale prefetch jobs are dropped once the
   queue grows past 24 entries, so hammering the arrow keys never builds a backlog.
@@ -66,9 +66,36 @@ file was prefetched, which is the normal case while browsing with the arrow keys
 - **Downscaled decodes.** Images larger than 2048 px on the long edge are box-filtered down on
   the worker thread, which keeps uploads cheap and memory bounded. The panel still reports the
   original resolution.
+- **Idle costs nothing.** With no preview open the loop parks in `glfwWaitEventsTimeout` and
+  renders nothing at all. While open it is capped at 60 FPS - a static panel has no business
+  driving a high refresh display.
 
 The panel footer shows the live numbers: time from keypress to visible content, whether it was a
 cache hit, frame rate and cache usage.
+
+## How the panel looks the way it does
+
+The panel sizes itself to its content, up to 1080p: an image gets a window that hugs it and is
+never scaled up, a fallback gets a small one, text gets the full size. It is centred on whichever
+monitor Explorer is on.
+
+Its rounded corners come from `DWMWA_WINDOW_CORNER_PREFERENCE`. The obvious alternative,
+`SetWindowRgn`, opts the window out of DWM per-pixel alpha - which is why rounded corners and a
+translucent background could never both work while that was in use. It also produced two visibly
+different radii, because `CreateRoundRectRgn` takes ellipse diameters where the drawn border took
+a radius.
+
+The frosted backdrop is ours, not the compositor's. Windows composites this OpenGL window
+opaquely: it reports `GLFW_TRANSPARENT_FRAMEBUFFER` as granted but ignores the alpha channel, and
+neither `DwmEnableBlurBehindWindow`, nor `SetWindowCompositionAttribute` in any accent state, nor
+`DWMWA_SYSTEMBACKDROP_TYPE` changes that. Real acrylic would mean rendering through
+DirectComposition instead of a WGL swap chain, on top of undocumented DWM exports. So PeekaBoo
+grabs the screen itself while the panel is still hidden and shrinks it to an eighth with
+`StretchBlt` in `HALFTONE` mode - that averaging *is* the blur - then stretches it back underneath
+the panel, where bilinear filtering smooths it further. The snapshot covers the whole monitor, so
+arrowing on to another file only moves the sampled UV rectangle; nothing is grabbed again.
+
+`kBlurDivisor` sets the blur radius and `kPanelTint` how much of it reads through.
 
 ## Architecture
 
@@ -78,21 +105,19 @@ Four translation units, flat, no framework:
 | --- | --- |
 | `src/main.cpp` | tray icon, low-level keyboard hook, event loop |
 | `src/shell.cpp` | Windows shell integration: which file is selected in the focused Explorer/desktop view |
-| `src/preview.cpp` | worker pool, memory mapped I/O, image and text decoding |
-| `src/overlay.cpp` | the preview panel: GPU texture cache, layout, drawing |
+| `src/preview.cpp` | worker pool, memory mapped I/O, image and text decoding, shell icons |
+| `src/overlay.cpp` | the preview panel: GPU texture cache, backdrop, layout, drawing |
 
-The event loop idles in `glfwWaitEventsTimeout` while no preview is open, so a hidden PeekaBoo
-costs no measurable CPU. The keyboard hook only sets a flag - it never does real work, because it
-runs inline with the system's input processing.
+The keyboard hook only sets a flag - it never does real work, because it runs inline with the
+system's input processing and a slow hook gets silently unhooked.
 
 `shell.cpp` binds to the focused Explorer window through `IShellWindows` -> `IShellBrowser` ->
 `IFolderView2` and caches that binding, so polling the selection every frame is a single cheap
 COM call rather than a full enumeration.
 
 The preview window is borderless, topmost, `WS_EX_NOACTIVATE` and `WS_EX_TOOLWINDOW`: it never
-takes focus away from Explorer (which is what makes the arrow keys keep working) and never shows
-up in the taskbar or Alt+Tab. Its rounded corners come from `SetWindowRgn`, so the look does not
-depend on the compositor granting a transparent framebuffer.
+takes focus away from Explorer - which is what makes the arrow keys keep working - and never
+shows up in the taskbar or Alt+Tab.
 
 ## Build
 
@@ -110,8 +135,9 @@ Windows subsystem executable, with `/ENTRY:mainCRTStartup` so `int main()` stays
 ## Known limitations
 
 - Windows only. The decoding layer is portable (there is a POSIX `mmap` path), but the shell
-  integration and the keyboard hook are Win32.
+  integration, the keyboard hook and the backdrop are Win32.
+- The backdrop is frozen: it shows the screen as it was when the preview opened. Anything moving
+  underneath while it is open is not picked up.
 - Explorer's own sort order is not read; neighbour prefetch uses a name sort of the folder.
-- Clicking inside the panel does not steal focus, but mouse wheel scrolling in text previews
-  relies on the Windows "scroll inactive windows on hover" setting, which is on by default.
-- No PDF, no video, no thumbnails from shell extensions.
+- Mouse wheel scrolling in text previews relies on the Windows "scroll inactive windows on hover"
+  setting, which is on by default, because the panel never takes focus.
