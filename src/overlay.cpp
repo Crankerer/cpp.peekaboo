@@ -45,7 +45,11 @@ constexpr int kUnknownWidth = 960;  // size while the preview is still decoding
 constexpr int kUnknownHeight = 640;
 constexpr int kMediaWidth = 640;  // audio, and video before its size is known
 constexpr int kMediaHeight = 480;
-constexpr int kTimelineHeight = 46;
+constexpr float kTimelineHeight = 84.0f;  // seek bar, transport buttons and the clock line
+constexpr float kVolumeColumn = 44.0f;    // width the volume slider needs to float in
+constexpr ImU32 kScrim = IM_COL32(14, 15, 20, 188);  // tint over the frosted control backing
+constexpr double kSkipSeconds = 10.0;
+constexpr float kVolumeStep = 0.05f;
 constexpr int kBlurDivisor = 8;
 constexpr float kButtonRounding = 8.0f;  // matches the radius Windows 11 rounds the window with
 constexpr ImU32 kButton = IM_COL32(18, 19, 23, 205);  // same weight as the text preview background
@@ -156,6 +160,46 @@ void centeredText(ImFont* font, float size, const ImVec2& areaMin, const ImVec2&
                                         text.c_str());
 }
 
+struct Hit {
+    bool clicked = false;
+    bool hovered = false;
+    bool active = false;  // held down, which is what makes a slider drag
+};
+
+// The panel paints through the draw list, so a control that wants the mouse has
+// to borrow the ImGui cursor and hand it straight back.
+Hit hitTest(const char* id, const ImVec2& min, const ImVec2& max) {
+    const ImVec2 cursor = ImGui::GetCursorScreenPos();
+    ImGui::SetCursorScreenPos(min);
+    ImGui::InvisibleButton(id, ImVec2(std::max(1.0f, max.x - min.x), std::max(1.0f, max.y - min.y)));
+    const Hit state{ImGui::IsItemClicked(), ImGui::IsItemHovered(), ImGui::IsItemActive()};
+    ImGui::SetCursorScreenPos(cursor);
+    return state;
+}
+
+// Transport glyphs. No icon font is loaded, and these are simple enough that
+// asking one to exist would cost more than drawing them.
+void glyphPlay(ImDrawList* draw, const ImVec2& c, ImU32 color) {
+    draw->AddTriangleFilled(ImVec2(c.x + 8.0f, c.y), ImVec2(c.x - 6.0f, c.y + 9.0f), ImVec2(c.x - 6.0f, c.y - 9.0f),
+                            color);
+}
+
+void glyphPause(ImDrawList* draw, const ImVec2& c, ImU32 color) {
+    draw->AddRectFilled(ImVec2(c.x - 7.0f, c.y - 9.0f), ImVec2(c.x - 2.0f, c.y + 9.0f), color, 1.5f);
+    draw->AddRectFilled(ImVec2(c.x + 2.0f, c.y - 9.0f), ImVec2(c.x + 7.0f, c.y + 9.0f), color, 1.5f);
+}
+
+// Two chevrons; direction is +1 forward, -1 back. The winding follows the
+// direction so the anti-aliased edge stays on the outside either way.
+void glyphSkip(ImDrawList* draw, const ImVec2& c, float direction, ImU32 color) {
+    for (const float offset : {-7.0f, 1.0f}) {
+        const float base = c.x + direction * offset;
+        const float tip = c.x + direction * (offset + 6.0f);
+        draw->AddTriangleFilled(ImVec2(tip, c.y), ImVec2(base, c.y + direction * 8.0f),
+                                ImVec2(base, c.y - direction * 8.0f), color);
+    }
+}
+
 }  // namespace
 
 // --- GPU texture ------------------------------------------------------------
@@ -230,7 +274,10 @@ void Overlay::show(const fs::path& file) {
 
     player_.reset();  // whatever was playing belongs to the file we just left
     video_ = Texture{};
-    if (current_.kind == Kind::Media) player_ = std::make_unique<media::Player>(current_.path);
+    if (current_.kind == Kind::Media) {
+        player_ = std::make_unique<media::Player>(current_.path);
+        player_->setVolume(volume_);  // the level the user last set, not full blast
+    }
 
     if (const fs::path parent = file.parent_path(); parent != siblingDir_) {
         siblingDir_ = parent;
@@ -248,6 +295,17 @@ void Overlay::show(const fs::path& file) {
 
 void Overlay::togglePlayback() {
     if (player_) player_->toggle();
+}
+
+void Overlay::skipPlayback(double seconds) {
+    if (player_) player_->skip(seconds);
+}
+
+void Overlay::adjustVolume(int steps) { setVolume(volume_ + static_cast<float>(steps) * kVolumeStep); }
+
+void Overlay::setVolume(float value) {
+    volume_ = std::clamp(value, 0.0f, 1.0f);
+    if (player_) player_->setVolume(volume_);
 }
 
 void Overlay::close() {
@@ -284,11 +342,12 @@ void Overlay::layoutWindow() {
         width = std::clamp(static_cast<int>(entry->texture.width * scale) + kChromeX, kMinWidth, maxWidth);
         height = std::clamp(static_cast<int>(entry->texture.height * scale) + kChromeY, kMinHeight, maxHeight);
     } else if (player_ && player_->hasVideo() && player_->width() > 0) {
+        // The transport and the volume slider float over the picture, so they
+        // are not part of the chrome the window has to make room for.
         const float scale = std::min({1.0f, static_cast<float>(maxWidth - kChromeX) / player_->width(),
-                                      static_cast<float>(maxHeight - kChromeY - kTimelineHeight) / player_->height()});
+                                      static_cast<float>(maxHeight - kChromeY) / player_->height()});
         width = std::clamp(static_cast<int>(player_->width() * scale) + kChromeX, kMinWidth, maxWidth);
-        height = std::clamp(static_cast<int>(player_->height() * scale) + kChromeY + kTimelineHeight, kMinHeight,
-                            maxHeight);
+        height = std::clamp(static_cast<int>(player_->height() * scale) + kChromeY, kMinHeight, maxHeight);
     } else if (current_.kind == Kind::Media) {
         width = std::min(kMediaWidth, maxWidth);  // audio, or video we have not opened yet
         height = std::min(kMediaHeight, maxHeight);
@@ -328,6 +387,25 @@ void Overlay::captureBackdrop() {
 
     const ImageData shot = grabScreen(info.rcMonitor.left, info.rcMonitor.top, width, height, kBlurDivisor);
     backdrop_ = shot.rgba.empty() ? Texture{} : Texture(shot);
+}
+
+// The panel draws at viewport coordinates; the snapshot is indexed in screen
+// coordinates, so a control has to be translated back before it can sample it.
+ImVec2 Overlay::backdropUV(const ImVec2& point) const {
+    const ImVec2 origin = ImGui::GetMainViewport()->Pos;
+    const float screenX = static_cast<float>(windowX_) + (point.x - origin.x);
+    const float screenY = static_cast<float>(windowY_) + (point.y - origin.y);
+    return ImVec2((screenX - backdropOrigin_.x) / backdropSize_.x, (screenY - backdropOrigin_.y) / backdropSize_.y);
+}
+
+// A control backing cut out of the same frosted snapshot the panel sits on,
+// rather than a flat plate laid over the picture.
+void Overlay::drawFrosted(const ImVec2& min, const ImVec2& max, float rounding, float ease) {
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    if (backdrop_.valid())
+        draw->AddImageRounded(textureId(backdrop_.id), min, max, backdropUV(min), backdropUV(max),
+                              fade(IM_COL32_WHITE, ease), rounding);
+    draw->AddRectFilled(min, max, fade(kScrim, ease), rounding);
 }
 
 // --- cache ------------------------------------------------------------------
@@ -518,10 +596,10 @@ void Overlay::drawHeader(const Entry* entry, float titleLimit) {
     ImGui::Separator();
 }
 
-// Video picture or cover art, with the transport underneath.
+// Video picture or cover art. The controls float on top of it: the picture is
+// given the whole content area and pays nothing for them.
 void Overlay::drawMedia(const Entry* entry, const ImVec2& min, const ImVec2& max, float ease) {
     ImDrawList* draw = ImGui::GetWindowDrawList();
-    const ImVec2 pictureMax(max.x, max.y - kTimelineHeight);
 
     if (player_->failed()) {
         centeredText(ImGui::GetFont(), 16.0f, min, max, (min.y + max.y) * 0.5f, fade(kMuted, ease),
@@ -530,33 +608,122 @@ void Overlay::drawMedia(const Entry* entry, const ImVec2& min, const ImVec2& max
     }
 
     if (video_.valid()) {
-        const auto [pos, size] = fitInto(min, pictureMax, video_.width, video_.height);
+        const auto [pos, size] = fitInto(min, max, video_.width, video_.height);
         draw->AddImageRounded(textureId(video_.id), pos, pos + size, ImVec2(0, 0), ImVec2(1, 1),
                               fade(IM_COL32_WHITE, ease), 8.0f);
     } else if (entry && entry->texture.valid()) {  // cover art, or the poster the shell gave us
-        const float side = std::min({256.0f, pictureMax.x - min.x, pictureMax.y - min.y});
+        const float side = std::min({256.0f, max.x - min.x, max.y - min.y});
         const float scale = side / static_cast<float>(std::max(entry->texture.width, entry->texture.height));
-        const ImVec2 centre((min.x + pictureMax.x) * 0.5f, (min.y + pictureMax.y) * 0.5f);
+        const ImVec2 centre((min.x + max.x) * 0.5f, (min.y + max.y) * 0.5f);
         const ImVec2 half(entry->texture.width * scale * 0.5f, entry->texture.height * scale * 0.5f);
         draw->AddImage(textureId(entry->texture.id), centre - half, centre + half, ImVec2(0, 0), ImVec2(1, 1),
                        fade(IM_COL32_WHITE, ease));
     }
 
+    if (player_->hasAudio()) drawVolume(min, max, ease);
+    drawTransport(min, max, ease);
+}
+
+void Overlay::drawTransport(const ImVec2& min, const ImVec2& max, float ease) {
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    ImFont* font = ImGui::GetFont();
+
+    const float stripTop = max.y - kTimelineHeight;
     const double duration = player_->duration();
     const double position = duration > 0.0 ? std::min(player_->position(), duration) : player_->position();
 
-    const ImVec2 trackMin(min.x + 6.0f, max.y - 28.0f);
-    const ImVec2 trackMax(max.x - 6.0f, trackMin.y + 5.0f);
-    draw->AddRectFilled(trackMin, trackMax, fade(kTrack, ease), 2.5f);
-    if (duration > 0.0) {
-        const auto played = static_cast<float>(position / duration);
-        draw->AddRectFilled(trackMin, ImVec2(trackMin.x + (trackMax.x - trackMin.x) * played, trackMax.y),
-                            fade(kAccent, ease), 2.5f);
+    drawFrosted(ImVec2(min.x, stripTop), max, 10.0f, ease);  // it sits over the picture, so it brings its own backing
+
+    // --- seek bar: the whole strip is the hit area, not just the 6 px it draws
+    const ImVec2 trackMin(min.x + 14.0f, stripTop + 16.0f);
+    const ImVec2 trackMax(max.x - 14.0f, trackMin.y + 6.0f);
+    const Hit bar = hitTest("##seek", ImVec2(trackMin.x, trackMin.y - 11.0f), ImVec2(trackMax.x, trackMax.y + 11.0f));
+    if (bar.active && duration > 0.0) {
+        const float reached = (ImGui::GetIO().MousePos.x - trackMin.x) / (trackMax.x - trackMin.x);
+        player_->seek(std::clamp(reached, 0.0f, 1.0f) * duration);
     }
 
-    const char* state = player_->failed() ? "" : (player_->playing() ? "playing" : "paused");
-    centeredText(ImGui::GetFont(), 15.0f, min, max, trackMax.y + 7.0f, fade(kMuted, ease),
-                 std::format("{} / {}   {}", clockText(position), clockText(duration), state));
+    const float grow = bar.hovered ? 2.0f : 0.0f;  // thickens under the cursor, so it reads as clickable
+    const ImVec2 barMin(trackMin.x, trackMin.y - grow);
+    const ImVec2 barMax(trackMax.x, trackMax.y + grow);
+    draw->AddRectFilled(barMin, barMax, fade(kTrack, ease), 3.0f);
+    if (duration > 0.0) {
+        const auto played = static_cast<float>(position / duration);
+        const float head = trackMin.x + (trackMax.x - trackMin.x) * played;
+        draw->AddRectFilled(barMin, ImVec2(head, barMax.y), fade(kAccent, ease), 3.0f);
+        if (bar.hovered) draw->AddCircleFilled(ImVec2(head, (barMin.y + barMax.y) * 0.5f), 7.0f, fade(kText, ease));
+    }
+
+    // --- transport buttons, centred under the bar
+    const float row = stripTop + 56.0f;
+    const float side = 34.0f;
+    const float centreX = (min.x + max.x) * 0.5f;
+    const float step = side + 12.0f;
+
+    struct Button {
+        const char* id;
+        float offset;
+        int glyph;  // -1 back, 0 play/pause, +1 forward
+    };
+    for (const Button& button : {Button{"##back", -step, -1}, Button{"##play", 0.0f, 0}, Button{"##fwd", step, 1}}) {
+        const ImVec2 centre(centreX + button.offset, row);
+        const ImVec2 buttonMin(centre.x - side * 0.5f, centre.y - side * 0.5f);
+        const ImVec2 buttonMax(centre.x + side * 0.5f, centre.y + side * 0.5f);
+        const Hit state = hitTest(button.id, buttonMin, buttonMax);
+
+        if (state.clicked) {
+            if (button.glyph == 0)
+                player_->toggle();
+            else
+                player_->skip(button.glyph * kSkipSeconds);
+        }
+
+        draw->AddRectFilled(buttonMin, buttonMax, fade(state.hovered ? kButtonHover : kButton, ease), kButtonRounding);
+        const ImU32 ink = fade(kText, ease);
+        if (button.glyph < 0)
+            glyphSkip(draw, centre, -1.0f, ink);
+        else if (button.glyph > 0)
+            glyphSkip(draw, centre, 1.0f, ink);
+        else if (player_->playing())
+            glyphPause(draw, centre, ink);
+        else
+            glyphPlay(draw, centre, ink);
+    }
+
+    // --- clock on the left, state on the right, both clear of the buttons
+    const float textY = row - 8.0f;
+    draw->AddText(font, 15.0f, ImVec2(min.x + 16.0f, textY), fade(kMuted, ease),
+                  std::format("{} / {}", clockText(position), clockText(duration)).c_str());
+
+    const char* state = player_->finished() ? "ended" : (player_->playing() ? "playing" : "paused");
+    const float width = font->CalcTextSizeA(15.0f, FLT_MAX, 0.0f, state).x;
+    draw->AddText(font, 15.0f, ImVec2(max.x - 16.0f - width, textY), fade(kMuted, ease), state);
+}
+
+// Vertical slider floating over the right hand edge of the picture, level shown
+// underneath. Dragging it and the mouse wheel set the same value.
+void Overlay::drawVolume(const ImVec2& min, const ImVec2& max, float ease) {
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+
+    const float centreX = max.x - kVolumeColumn * 0.5f;
+    const float available = max.y - kTimelineHeight - min.y;  // clear of the transport below
+    const float span = std::clamp(available * 0.5f, 48.0f, 150.0f);
+    const float top = min.y + (available - span) * 0.5f;
+    const float bottom = top + span;
+
+    const Hit slider =
+        hitTest("##volume", ImVec2(centreX - 15.0f, top - 12.0f), ImVec2(centreX + 15.0f, bottom + 12.0f));
+    if (slider.active) setVolume(1.0f - (ImGui::GetIO().MousePos.y - top) / span);
+
+    drawFrosted(ImVec2(centreX - 15.0f, top - 14.0f), ImVec2(centreX + 15.0f, bottom + 30.0f), 15.0f, ease);
+
+    draw->AddRectFilled(ImVec2(centreX - 2.5f, top), ImVec2(centreX + 2.5f, bottom), fade(kTrack, ease), 2.5f);
+    const float level = bottom - span * volume_;
+    draw->AddRectFilled(ImVec2(centreX - 2.5f, level), ImVec2(centreX + 2.5f, bottom), fade(kAccent, ease), 2.5f);
+    draw->AddCircleFilled(ImVec2(centreX, level), slider.hovered || slider.active ? 7.0f : 5.5f, fade(kText, ease));
+
+    centeredText(ImGui::GetFont(), 13.0f, ImVec2(centreX - 20.0f, 0.0f), ImVec2(centreX + 20.0f, 0.0f), bottom + 11.0f,
+                 fade(kMuted, ease), std::format("{}%", static_cast<int>(volume_ * 100.0f + 0.5f)));
 }
 
 void Overlay::drawContent(const Entry* entry, const ImVec2& min, const ImVec2& max, float ease) {
@@ -634,7 +801,8 @@ void Overlay::drawFooter(const Entry* entry, const ImVec2& min, const ImVec2& ma
     const auto* text = entry ? std::get_if<TextData>(&entry->preview.content) : nullptr;
     const std::string footer = std::format(
         "Space / Esc close     arrows browse{}     open {:.2f} ms ({})     {:.0f} FPS     cache {} / {}{}",
-        player_ ? "     Enter play / pause" : "", lastOpenMs_, lastOpenWasHit_ ? "prefetched" : "decoded",
+        player_ ? "     Enter play / pause     wheel volume" : "", lastOpenMs_,
+        lastOpenWasHit_ ? "prefetched" : "decoded",
         average > 0.0f ? 1000.0f / average : 0.0f, humanSize(cacheBytes_), humanSize(budget_),
         text && text->truncated ? "     truncated at 1 MiB" : "");
 

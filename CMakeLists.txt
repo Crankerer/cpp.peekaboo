@@ -1,6 +1,10 @@
 cmake_minimum_required(VERSION 3.24)
 project(PeekaBoo LANGUAGES CXX)
 
+if(WIN32)
+    enable_language(RC)  # the tray and taskbar icon
+endif()
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -54,14 +58,23 @@ add_executable(peekaboo
     src/media.cpp
     src/overlay.cpp
     src/preview.cpp
-    src/shell.cpp)
+    src/shell.cpp
+    src/startup.cpp)
+
+if(WIN32)
+    # The icon lives in its own target on purpose: windres hands the compiling
+    # target's include paths to its preprocessor unquoted, so a space in any of
+    # them fails the build. Here there are none to hand over.
+    add_library(peekaboo_icon OBJECT src/peekaboo.rc)
+    target_link_libraries(peekaboo PRIVATE peekaboo_icon)
+endif()
 set_target_properties(peekaboo PROPERTIES WIN32_EXECUTABLE TRUE)
 target_include_directories(peekaboo PRIVATE ${stb_SOURCE_DIR} ${miniaudio_SOURCE_DIR})
 target_link_libraries(peekaboo PRIVATE imgui glfw OpenGL::GL)
 
 if(WIN32)
     target_compile_definitions(peekaboo PRIVATE UNICODE _UNICODE)
-    target_link_libraries(peekaboo PRIVATE dwmapi mfplat mfreadwrite mfuuid ole32 oleaut32 shell32 shlwapi
+    target_link_libraries(peekaboo PRIVATE advapi32 dwmapi mfplat mfreadwrite mfuuid ole32 oleaut32 shell32 shlwapi
                                        uuid windowscodecs winmm)
 endif()
 

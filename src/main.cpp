@@ -18,7 +18,9 @@
 
 #include "media.hpp"
 #include "overlay.hpp"
+#include "resource.hpp"
 #include "shell.hpp"
+#include "startup.hpp"
 
 namespace {
 
@@ -27,7 +29,8 @@ constexpr std::size_t kBudgetBytes = 512u << 20;
 // burning a high refresh display's worth of frames.
 constexpr auto kFrameBudget = std::chrono::microseconds(1'000'000 / 60);
 constexpr UINT kTrayMessage = WM_APP + 1;
-constexpr UINT kTrayExit = 1;
+constexpr UINT kTrayAutostart = 1;
+constexpr UINT kTrayExit = 2;
 
 // Written by the keyboard hook, consumed by the event loop.
 std::atomic<bool> gToggle{false};
@@ -36,6 +39,15 @@ std::atomic<bool> gPlayPause{false};
 std::atomic<bool> gOverlayOpen{false};
 bool gSwallowedSpace = false;
 bool gSwallowedEnter = false;
+
+// Written by the mouse hook: wheel notches collected over the panel, and the
+// panel rectangle it tests them against.
+std::atomic<int> gWheel{0};
+std::atomic<bool> gMediaOpen{false};
+std::atomic<LONG> gPanelLeft{0};
+std::atomic<LONG> gPanelTop{0};
+std::atomic<LONG> gPanelRight{0};
+std::atomic<LONG> gPanelBottom{0};
 
 NOTIFYICONDATAW gTray{};
 
@@ -78,11 +90,33 @@ LRESULT CALLBACK keyboardHook(int code, WPARAM message, LPARAM data) {
     return CallNextHookEx(nullptr, code, message, data);
 }
 
+// The wheel would otherwise go to whatever has keyboard focus - Explorer, never
+// us, because the panel refuses focus by design. So we take it at the source,
+// but only while a media preview is on screen: text previews still want it.
+LRESULT CALLBACK mouseHook(int code, WPARAM message, LPARAM data) {
+    if (code != HC_ACTION || message != WM_MOUSEWHEEL || !gMediaOpen.load(std::memory_order_relaxed))
+        return CallNextHookEx(nullptr, code, message, data);
+
+    const auto& mouse = *reinterpret_cast<const MSLLHOOKSTRUCT*>(data);
+    const bool overPanel = mouse.pt.x >= gPanelLeft.load(std::memory_order_relaxed) &&
+                           mouse.pt.x < gPanelRight.load(std::memory_order_relaxed) &&
+                           mouse.pt.y >= gPanelTop.load(std::memory_order_relaxed) &&
+                           mouse.pt.y < gPanelBottom.load(std::memory_order_relaxed);
+    if (!overPanel) return CallNextHookEx(nullptr, code, message, data);
+
+    gWheel.fetch_add(GET_WHEEL_DELTA_WPARAM(mouse.mouseData) / WHEEL_DELTA, std::memory_order_relaxed);
+    return 1;  // and Explorer must not scroll its view underneath us
+}
+
 LRESULT CALLBACK trayProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
     if (message != kTrayMessage || (lparam != WM_RBUTTONUP && lparam != WM_LBUTTONUP))
         return DefWindowProcW(window, message, wparam, lparam);
 
+    const bool autostart = pb::startup::enabled();
+
     HMENU menu = CreatePopupMenu();
+    AppendMenuW(menu, MF_STRING | (autostart ? MF_CHECKED : MF_UNCHECKED), kTrayAutostart, L"Start with Windows");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, kTrayExit, L"Exit PeekaBoo");
 
     POINT cursor{};
@@ -92,7 +126,18 @@ LRESULT CALLBACK trayProc(HWND window, UINT message, WPARAM wparam, LPARAM lpara
     DestroyMenu(menu);
 
     if (choice == kTrayExit) PostQuitMessage(0);
+    if (choice == kTrayAutostart && !pb::startup::setEnabled(!autostart))
+        MessageBoxW(window, L"The autostart entry could not be changed.", L"PeekaBoo", MB_ICONWARNING | MB_OK);
     return 0;
+}
+
+// The notification area wants a small icon; asking for the exact metric keeps
+// Windows from scaling the 256 px frame down itself.
+HICON loadAppIcon(HINSTANCE instance, int size) {
+    if (HICON icon = static_cast<HICON>(
+            LoadImageW(instance, MAKEINTRESOURCEW(IDI_PEEKABOO), IMAGE_ICON, size, size, LR_DEFAULTCOLOR)))
+        return icon;
+    return LoadIconW(nullptr, IDI_APPLICATION);
 }
 
 HWND createTrayIcon(HINSTANCE instance) {
@@ -101,6 +146,8 @@ HWND createTrayIcon(HINSTANCE instance) {
     description.lpfnWndProc = trayProc;
     description.hInstance = instance;
     description.lpszClassName = L"PeekaBooTray";
+    description.hIcon = loadAppIcon(instance, GetSystemMetrics(SM_CXICON));
+    description.hIconSm = loadAppIcon(instance, GetSystemMetrics(SM_CXSMICON));
     RegisterClassExW(&description);
 
     HWND window = CreateWindowExW(0, description.lpszClassName, L"PeekaBoo", 0, 0, 0, 0, 0, nullptr, nullptr, instance,
@@ -112,7 +159,7 @@ HWND createTrayIcon(HINSTANCE instance) {
     gTray.uID = 1;
     gTray.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     gTray.uCallbackMessage = kTrayMessage;
-    gTray.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+    gTray.hIcon = loadAppIcon(instance, GetSystemMetrics(SM_CXSMICON));
     std::wcsncpy(gTray.szTip, L"PeekaBoo - select a file in Explorer and press Space", std::size(gTray.szTip) - 1);
     Shell_NotifyIconW(NIM_ADD, &gTray);
     return window;
@@ -196,8 +243,10 @@ int main() {
 
     HINSTANCE instance = GetModuleHandleW(nullptr);
     HWND tray = createTrayIcon(instance);
+    HWND native = glfwGetWin32Window(window);
     HHOOK hook = SetWindowsHookExW(WH_KEYBOARD_LL, keyboardHook, instance, 0);
     if (!hook) return fail(L"The keyboard hook could not be installed.");
+    HHOOK wheel = SetWindowsHookExW(WH_MOUSE_LL, mouseHook, instance, 0);  // volume; not worth failing over
 
     {
         pb::Overlay overlay(window, kBudgetBytes, fonts);
@@ -223,6 +272,7 @@ int main() {
             }
             if (gClose.exchange(false)) overlay.close();
             if (gPlayPause.exchange(false)) overlay.togglePlayback();
+            if (const int notches = gWheel.exchange(0)) overlay.adjustVolume(notches);
 
             if (overlay.open()) {  // arrow keys stay in Explorer, we just follow its selection
                 if (const auto file = pb::shell::selectedFile(); file && *file != overlay.file()) overlay.show(*file);
@@ -230,6 +280,14 @@ int main() {
                 pb::shell::forget();
             }
             gOverlayOpen.store(overlay.open(), std::memory_order_relaxed);
+            gMediaOpen.store(overlay.open() && overlay.hasMedia(), std::memory_order_relaxed);
+
+            if (RECT panel{}; overlay.open() && GetWindowRect(native, &panel)) {
+                gPanelLeft.store(panel.left, std::memory_order_relaxed);
+                gPanelTop.store(panel.top, std::memory_order_relaxed);
+                gPanelRight.store(panel.right, std::memory_order_relaxed);
+                gPanelBottom.store(panel.bottom, std::memory_order_relaxed);
+            }
 
             if (!overlay.open()) continue;
 
@@ -253,6 +311,7 @@ int main() {
     }  // the overlay must release its textures while the context is still alive
 
     UnhookWindowsHookEx(hook);
+    if (wheel) UnhookWindowsHookEx(wheel);
     Shell_NotifyIconW(NIM_DELETE, &gTray);
     if (tray) DestroyWindow(tray);
 

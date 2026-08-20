@@ -21,6 +21,7 @@
 #include <miniaudio.h>
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <format>
 #include <memory>
@@ -113,9 +114,16 @@ void configureVideo(Source& source) {
     source.width = static_cast<int>(width);
     source.height = static_cast<int>(height);
 
+    // MFGetStrideForBitmapInfoHeader answers for RGB32 with a *negative* stride,
+    // because a DIB is bottom-up by convention. The video processor does not
+    // deliver one: its buffers start at the top row. Taking that answer at face
+    // value is what stood every video on its head, so the fallback only supplies
+    // the pitch and an explicitly reported stride is the sole reason to flip.
     LONG stride = 0;
-    if (FAILED(actual->GetUINT32(MF_MT_DEFAULT_STRIDE, reinterpret_cast<UINT32*>(&stride))))
+    if (FAILED(actual->GetUINT32(MF_MT_DEFAULT_STRIDE, reinterpret_cast<UINT32*>(&stride))) || stride == 0) {
         MFGetStrideForBitmapInfoHeader(MFVideoFormat_RGB32.Data1, width, &stride);
+        stride = std::abs(stride);
+    }
     source.stride = static_cast<int>(stride);
 }
 
@@ -210,9 +218,21 @@ void Player::toggle() {
     playing_.store(!wasPlaying, std::memory_order_relaxed);
 }
 
+// Only parks the target; the worker owns the reader and picks it up next round.
+void Player::seek(double seconds) {
+    const double limit = duration_.load(std::memory_order_relaxed);
+    if (limit > 0.0) seconds = std::min(seconds, limit);
+    seekTo_.store(std::max(0.0, seconds), std::memory_order_relaxed);
+}
+
+void Player::skip(double seconds) { seek(position() + seconds); }
+
+void Player::setVolume(float gain) { volume_.store(std::clamp(gain, 0.0f, 1.0f), std::memory_order_relaxed); }
+
 double Player::position() const {
     if (hasAudio_.load(std::memory_order_relaxed))
-        return static_cast<double>(playedFrames_.load(std::memory_order_relaxed)) / kSampleRate;
+        return positionBase_.load(std::memory_order_relaxed) +
+               static_cast<double>(playedFrames_.load(std::memory_order_relaxed)) / kSampleRate;
 
     const std::lock_guard lock(mutex_);
     if (!playing_.load(std::memory_order_relaxed)) return silentPosition_;
@@ -226,23 +246,28 @@ std::string Player::details() const {
 
 void Player::fillAudio(std::int16_t* output, std::size_t frames) {
     const std::size_t wanted = frames * kChannels;
+    const float gain = volume_.load(std::memory_order_relaxed);
     std::size_t given = 0;
 
     if (playing_.load(std::memory_order_relaxed)) {
         const std::lock_guard lock(mutex_);
         while (given < wanted && ringFill_ > 0) {
-            output[given++] = ring_[ringRead_];
+            output[given++] = static_cast<std::int16_t>(ring_[ringRead_] * gain);
             ringRead_ = (ringRead_ + 1) % ring_.size();
             --ringFill_;
         }
+        // Counted under the same lock that a seek takes, so the clock can never
+        // pick up frames belonging to the position we just left.
+        playedFrames_.fetch_add(given / kChannels, std::memory_order_relaxed);
     }
     std::fill(output + given, output + wanted, std::int16_t{0});
-    playedFrames_.fetch_add(given / kChannels, std::memory_order_relaxed);
 }
 
 void Player::pushAudio(const std::int16_t* samples, std::size_t count, const std::stop_token& stop) {
     std::size_t written = 0;
-    while (written < count && !stop.stop_requested()) {
+    // A pending seek drops the rest: it belongs to the old position, and holding
+    // on to it would deadlock a paused player against a full ring.
+    while (written < count && !stop.stop_requested() && !seekPending()) {
         {
             const std::lock_guard lock(mutex_);
             while (written < count && ringFill_ < ring_.size()) {
@@ -256,7 +281,7 @@ void Player::pushAudio(const std::int16_t* samples, std::size_t count, const std
 }
 
 void Player::pushFrame(Frame&& frame, const std::stop_token& stop) {
-    while (!stop.stop_requested()) {
+    while (!stop.stop_requested() && !seekPending()) {
         {
             const std::lock_guard lock(mutex_);
             if (frames_.size() < kMaxFrames) {
@@ -318,15 +343,49 @@ void Player::run(std::stop_token stop) {
 
     bool videoDone = source.video == kNoStream;
     bool audioDone = source.audio == kNoStream;
+    // The stream that carries the clock, and whether the next sample from it has
+    // to tell us where a seek really landed.
+    const DWORD clockStream = source.audio != kNoStream ? source.audio : source.video;
+    bool rebase = false;
 
-    while (!stop.stop_requested() && !(videoDone && audioDone)) {
+    while (!stop.stop_requested()) {
+        if (const double target = seekTo_.exchange(-1.0, std::memory_order_relaxed); target >= 0.0) {
+            PROPVARIANT where{};
+            where.vt = VT_I8;
+            where.hVal.QuadPart = static_cast<LONGLONG>(target * 1e7);
+            source.reader->SetCurrentPosition(GUID_NULL, where);
+            PropVariantClear(&where);
+
+            const std::lock_guard lock(mutex_);
+            frames_.clear();  // everything queued belongs to the position we just left
+            ringRead_ = ringWrite_ = ringFill_ = 0;
+            playedFrames_.store(0, std::memory_order_relaxed);
+            positionBase_.store(target, std::memory_order_relaxed);
+            silentPosition_ = target;
+            resumedAt_ = std::chrono::steady_clock::now();
+            videoDone = source.video == kNoStream;  // the end of the file is behind us again
+            audioDone = source.audio == kNoStream;
+            finished_.store(false, std::memory_order_relaxed);
+            rebase = true;
+        }
+
+        // Both streams drained, but the reader stays alive: a seek can still bring
+        // the file back, and the panel keeps the picture it ended on.
+        if (videoDone && audioDone) {
+            finished_.store(true, std::memory_order_relaxed);
+            std::this_thread::sleep_for(std::chrono::milliseconds(8));
+            continue;
+        }
+
         DWORD streamIndex = 0;
         DWORD flags = 0;
         LONGLONG timestamp = 0;
         IMFSample* rawSample = nullptr;
         if (FAILED(source.reader->ReadSample(MF_SOURCE_READER_ANY_STREAM, 0, &streamIndex, &flags, &timestamp,
-                                             &rawSample)))
-            break;
+                                             &rawSample))) {
+            videoDone = audioDone = true;  // idle rather than die, so pause and the clock keep working
+            continue;
+        }
         const ComPtr<IMFSample> sample{rawSample};
 
         if (flags & MF_SOURCE_READERF_ENDOFSTREAM) {
@@ -334,6 +393,17 @@ void Player::run(std::stop_token stop) {
             if (streamIndex == source.audio) audioDone = true;
         }
         if (!sample) continue;
+
+        // A seek lands on the keyframe at or before the target, so the first
+        // sample back is the only honest answer to "where are we now".
+        if (rebase && streamIndex == clockStream) {
+            const double landed = static_cast<double>(timestamp) / 1e7;
+            positionBase_.store(landed, std::memory_order_relaxed);
+            const std::lock_guard lock(mutex_);
+            silentPosition_ = landed;
+            resumedAt_ = std::chrono::steady_clock::now();
+            rebase = false;
+        }
 
         const auto buffer =
             query<IMFMediaBuffer>([&](IMFMediaBuffer** out) { return sample->ConvertToContiguousBuffer(out); });

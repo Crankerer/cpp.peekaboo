@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <title>PeekaBoo</title>
+  <defs>
+    <linearGradient id="blue" gradientUnits="userSpaceOnUse" x1="18" y1="18" x2="238" y2="238">
+      <stop offset="0" stop-color="#3DA5FF"/>
+      <stop offset="1" stop-color="#0F3FE0"/>
+    </linearGradient>
+    <linearGradient id="iris" gradientUnits="userSpaceOnUse" x1="87" y1="87" x2="169" y2="169">
+      <stop offset="0" stop-color="#2C42B0"/>
+      <stop offset="1" stop-color="#111E70"/>
+    </linearGradient>
+  </defs>
+
+  <!-- eye: two mirrored cubics, white inset, iris, glint -->
+  <path fill="url(#blue)" d="M36,128 C65.4,50.7 190.6,50.7 220,128 C190.6,205.3 65.4,205.3 36,128 Z"/>
+  <path fill="#F8FAFD" d="M52,128 C76.3,66.7 179.7,66.7 204,128 C179.7,189.3 76.3,189.3 52,128 Z"/>
+  <circle fill="url(#iris)" cx="128" cy="128" r="41"/>
+  <circle fill="#ECF4FF" cx="145" cy="111" r="11"/>
+
+  <!-- viewfinder brackets -->
+  <g fill="none" stroke="url(#blue)" stroke-width="24" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M24,100 L24,56 A32,32 0 0 1 56,24 L100,24"/>
+    <path d="M232,100 L232,56 A32,32 0 0 0 200,24 L156,24"/>
+    <path d="M24,156 L24,200 A32,32 0 0 0 56,232 L100,232"/>
+    <path d="M232,156 L232,200 A32,32 0 0 1 200,232 L156,232"/>
+  </g>
+</svg>

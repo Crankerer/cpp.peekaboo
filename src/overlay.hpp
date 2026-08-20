@@ -28,8 +28,11 @@ public:
     void show(const std::filesystem::path& file);  // opens, or switches to another file
     void close();
     void togglePlayback();
+    void skipPlayback(double seconds);  // relative jump, negative goes back
+    void adjustVolume(int steps);       // one step per mouse wheel notch
 
     [[nodiscard]] bool open() const noexcept { return open_; }
+    [[nodiscard]] bool hasMedia() const noexcept { return player_ != nullptr; }
     [[nodiscard]] const std::filesystem::path& file() const noexcept { return current_.path; }
 
     void frame(float dt);  // build the ImGui frame; call between NewFrame and Render
@@ -66,11 +69,19 @@ private:
     [[nodiscard]] Entry* lookup(const FileEntry& file);
     void layoutWindow();
     void captureBackdrop();
+    void setVolume(float value);
+
+    // Where a point of the panel falls in the monitor snapshot, so a control can
+    // be cut out of the same frosted material as the panel background.
+    [[nodiscard]] ImVec2 backdropUV(const ImVec2& point) const;
+    void drawFrosted(const ImVec2& min, const ImVec2& max, float rounding, float ease);
 
     void drawHeader(const Entry* entry, float titleLimit);
     [[nodiscard]] float drawOpenWith(const ImVec2& panelMin, const ImVec2& panelMax);
     void drawContent(const Entry* entry, const ImVec2& min, const ImVec2& max, float ease);
     void drawMedia(const Entry* entry, const ImVec2& min, const ImVec2& max, float ease);
+    void drawTransport(const ImVec2& min, const ImVec2& max, float ease);  // seek bar, buttons, clock
+    void drawVolume(const ImVec2& min, const ImVec2& max, float ease);     // slider at the right edge
     void drawFooter(const Entry* entry, const ImVec2& min, const ImVec2& max, float ease);
 
     GLFWwindow* window_;
@@ -89,6 +100,7 @@ private:
 
     std::unique_ptr<media::Player> player_;  // alive only while a media file is on screen
     Texture video_;                          // streaming target for the player's frames
+    float volume_ = 1.0f;                    // outlives the player, so it carries from file to file
 
     Texture backdrop_;        // blurred snapshot of whatever is behind the panel
     ImVec2 backdropOrigin_{};  // screen region that snapshot covers
