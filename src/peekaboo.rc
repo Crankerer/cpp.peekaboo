@@ -1,5 +1,0 @@
-#include "resource.hpp"
-
-// Generated from doc/icon.svg; the resource compiler resolves this relative to
-// this file, which is why the .ico sits next to it.
-IDI_PEEKABOO ICON "peekaboo.ico"

@@ -1,5 +1,21 @@
+# Build trees, whatever they are called
 build/
+build-*/
 out/
+cmake-build-*/
+
+# IDE and editor state
 .vs/
+.vscode/
+.idea/
 .cache/
 *.user
+CMakeUserPresets.json
+
+# Windows debris
+Thumbs.db
+desktop.ini
+*.pdb
+*.ilk
+*.obj
+*.exe

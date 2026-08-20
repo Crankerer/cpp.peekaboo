@@ -6,7 +6,6 @@
 #endif
 #include <windows.h>
 
-#include <asyncinfo.h>
 #include <inspectable.h>
 #include <objidl.h>
 #include <roapi.h>
@@ -25,10 +24,14 @@ namespace fs = std::filesystem;
 namespace pb::pdf {
 
 // --- Windows.Data.Pdf, declared by hand --------------------------------------
-// The MinGW SDK ships the WinRT core (roapi, winstring, asyncinfo) but no
-// projection for this namespace. IIDs and, more importantly, method order come
-// straight from the Windows SDK's windows.data.pdf.h: the order *is* the ABI, so
-// nothing here may be reordered or omitted, even the methods we never call.
+// The MinGW SDK ships the WinRT core (roapi, winstring) but no projection for
+// this namespace. IIDs and, more importantly, method order come straight from
+// the Windows SDK's windows.data.pdf.h: the order *is* the ABI, so nothing here
+// may be reordered or omitted, even the methods we never call.
+//
+// IAsyncInfo is declared here too rather than taken from <asyncinfo.h>, because
+// that header puts it in the global namespace under MinGW and in
+// ABI::Windows::Foundation under MSVC. One declaration builds with both.
 //
 // These must keep external linkage. Inside an anonymous namespace GCC can see
 // the complete set of derived classes - none, because the implementations live
@@ -102,6 +105,16 @@ struct IDocumentOperation : IInspectable {
     virtual HRESULT STDMETHODCALLTYPE GetResults(IPdfDocument** result) = 0;
 };
 
+enum class AsyncState : int { Started = 0, Completed = 1, Canceled = 2, Error = 3 };
+
+struct IAsyncState : IInspectable {
+    virtual HRESULT STDMETHODCALLTYPE get_Id(UINT32* value) = 0;
+    virtual HRESULT STDMETHODCALLTYPE get_Status(AsyncState* value) = 0;
+    virtual HRESULT STDMETHODCALLTYPE get_ErrorCode(HRESULT* value) = 0;
+    virtual HRESULT STDMETHODCALLTYPE Cancel() = 0;
+    virtual HRESULT STDMETHODCALLTYPE Close() = 0;
+};
+
 }  // namespace abi
 
 namespace {
@@ -117,7 +130,6 @@ constexpr GUID kIidPdfPageRenderOptions{
     0x3c98056f, 0xb7cf, 0x4c29, {0x9a, 0x04, 0x52, 0xd9, 0x02, 0x67, 0xf4, 0x25}};
 constexpr GUID kIidRandomAccessStream{
     0x905a0fe1, 0xbc53, 0x11df, {0x8c, 0x49, 0x00, 0x1e, 0x4f, 0xc6, 0x86, 0xda}};
-// asyncinfo.h only declares IID_IAsyncInfo; no MinGW import library defines it.
 constexpr GUID kIidAsyncInfo{0x00000036, 0x0000, 0x0000, {0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}};
 
 template <class T>
@@ -142,17 +154,17 @@ struct HString {
 // Polls instead of installing a completion handler: this runs on our own worker
 // thread, which has nothing else to do until the page comes out.
 bool await(IInspectable* operation) {
-    IAsyncInfo* rawInfo = nullptr;
+    IAsyncState* rawInfo = nullptr;
     if (FAILED(operation->QueryInterface(kIidAsyncInfo, reinterpret_cast<void**>(&rawInfo)))) return false;
-    const ComPtr<IAsyncInfo> info{rawInfo};
+    const ComPtr<IAsyncState> info{rawInfo};
 
     const auto deadline = std::chrono::steady_clock::now() + kAwaitTimeout;
-    AsyncStatus status = AsyncStatus::Started;
+    AsyncState status = AsyncState::Started;
     while (std::chrono::steady_clock::now() < deadline) {
-        if (FAILED(info->get_Status(&status)) || status != AsyncStatus::Started) break;
+        if (FAILED(info->get_Status(&status)) || status != AsyncState::Started) break;
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
-    return status == AsyncStatus::Completed;
+    return status == AsyncState::Completed;
 }
 
 // Windows.Data.Pdf speaks IRandomAccessStream; the shell gives us plain IStream,

@@ -1,0 +1,65 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: MinGW
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # No Visual Studio anywhere in this: msys2 brings its own gcc, cmake and
+      # ninja, which is the same toolchain the project is developed with.
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            git
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+
+      # GLFW, Dear ImGui, stb and miniaudio are fetched at pinned versions on the
+      # first configure. Nothing but CMakeLists.txt can change which ones.
+      - name: Cache fetched dependencies
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: deps-${{ hashFiles('CMakeLists.txt') }}
+
+      # The build number: one per run of this workflow, counting up. A local
+      # build passes nothing and is version 0, which tells the two apart.
+      - name: Configure
+        run: >-
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DPEEKABOO_VERSION_MAJOR=${{ github.run_number }}
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Check the version stamp
+        shell: pwsh
+        run: |
+          $version = (Get-Item build/peekaboo.exe).VersionInfo.FileVersion
+          Write-Host "peekaboo.exe reports $version"
+          if ($version -notlike "${{ github.run_number }}.*") {
+            throw "expected version ${{ github.run_number }}.x, got $version"
+          }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: peekaboo-v${{ github.run_number }}
+          path: build/peekaboo.exe
+          if-no-files-found: error

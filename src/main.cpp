@@ -161,7 +161,8 @@ HWND createTrayIcon(HINSTANCE instance) {
     gTray.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     gTray.uCallbackMessage = kTrayMessage;
     gTray.hIcon = loadAppIcon(instance, GetSystemMetrics(SM_CXSMICON));
-    std::wcsncpy(gTray.szTip, L"PeekaBoo - select a file in Explorer and press Space", std::size(gTray.szTip) - 1);
+    std::swprintf(gTray.szTip, std::size(gTray.szTip), L"PeekaBoo %hs - select a file in Explorer and press Space",
+                  PEEKABOO_VERSION);
     Shell_NotifyIconW(NIM_ADD, &gTray);
     return window;
 }

@@ -73,7 +73,9 @@ ImU32 kindColor(Kind kind) {
     return kMuted;
 }
 
-ImTextureID textureId(unsigned id) { return reinterpret_cast<ImTextureID>(static_cast<std::uintptr_t>(id)); }
+// ImTextureID is an integer wide enough for a pointer, so this is a widening
+// conversion and not a reinterpretation - MSVC rejects the latter outright.
+ImTextureID textureId(unsigned id) { return static_cast<ImTextureID>(id); }
 
 ImU32 fade(ImU32 color, float alpha) {
     const auto a = static_cast<ImU32>(((color >> IM_COL32_A_SHIFT) & 0xFF) * alpha);

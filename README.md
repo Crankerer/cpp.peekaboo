@@ -6,6 +6,12 @@
 
 <p align="center">Quick Look for Windows. Select a file, press <b>Space</b>, look at it.</p>
 
+<p align="center">
+  <a href="https://github.com/Crankerer/cpp.peekaboo/actions/workflows/build.yml">
+    <img src="https://github.com/Crankerer/cpp.peekaboo/actions/workflows/build.yml/badge.svg" alt="build">
+  </a>
+</p>
+
 ---
 
 Pick a file in **Windows Explorer** or on the **desktop**, tap **Space**, and the preview panel is
@@ -98,8 +104,8 @@ With no preview open, PeekaBoo draws nothing at all; with one open it caps itsel
 
 ## Building it
 
-CMake 3.24+, a C++20 compiler, and a network connection on the first configure so GLFW, Dear ImGui,
-stb and miniaudio can be fetched at pinned versions. Everything else comes from Windows.
+CMake 3.24+, MinGW-w64 GCC 13 or newer, and a network connection on the first configure so GLFW,
+Dear ImGui, stb and miniaudio can be fetched at pinned versions. Everything else comes from Windows.
 
 ```bash
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
@@ -109,8 +115,16 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ```
 
-The result is `build\peekaboo.exe` — one executable, no install step, no runtime to deploy. Tested
-with MinGW g++ 15.2 and with MSVC on Windows 11.
+The result is `build\peekaboo.exe` — one file. The GCC runtime is linked statically, so there is no
+install step and nothing to deploy beside it.
+
+Every push builds the same way on GitHub, with the same two commands, and attaches the executable
+to the run. Each run stamps its own number as the version, so `peekaboo.exe` built by CI reports
+`17.0.0` on run 17; a local build reports `0.0.0` unless you pass `-DPEEKABOO_VERSION_MAJOR=…`.
+Right-click the tray icon, or check the file's properties, to see which one you have.
+
+MSVC is not supported. Some of the Windows headers this uses need a different include order there,
+and nothing checks it, so assume it does not build.
 
 ## Under the hood, briefly
 

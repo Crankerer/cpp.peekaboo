@@ -1,8 +1,14 @@
 cmake_minimum_required(VERSION 3.24)
-project(PeekaBoo LANGUAGES CXX)
+
+# One number, counted up per build. CI passes its run number; a local build that
+# says nothing is version 0, which is how you tell the two apart.
+set(PEEKABOO_VERSION_MAJOR "0" CACHE STRING "Build number stamped into the executable")
+set(PEEKABOO_VERSION "${PEEKABOO_VERSION_MAJOR}.0.0")
+
+project(PeekaBoo VERSION ${PEEKABOO_VERSION} LANGUAGES CXX)
 
 if(WIN32)
-    enable_language(RC)  # the tray and taskbar icon
+    enable_language(RC)  # the icon and the version stamp
 endif()
 
 set(CMAKE_CXX_STANDARD 20)
@@ -63,18 +69,26 @@ add_executable(peekaboo
     src/startup.cpp)
 
 if(WIN32)
-    # The icon lives in its own target on purpose: windres hands the compiling
-    # target's include paths to its preprocessor unquoted, so a space in any of
-    # them fails the build. Here there are none to hand over.
-    add_library(peekaboo_icon OBJECT src/peekaboo.rc)
+    set(PEEKABOO_ICON_FILE "${CMAKE_CURRENT_SOURCE_DIR}/src/peekaboo.ico")
+    configure_file(src/peekaboo.rc.in "${CMAKE_CURRENT_BINARY_DIR}/peekaboo.rc" @ONLY)
+
+    # The resource lives in its own target on purpose: windres hands the
+    # compiling target's include paths to its preprocessor unquoted, so a space
+    # in any of them fails the build. Here there are none to hand over.
+    add_library(peekaboo_icon OBJECT "${CMAKE_CURRENT_BINARY_DIR}/peekaboo.rc")
     target_link_libraries(peekaboo PRIVATE peekaboo_icon)
 endif()
+
+target_compile_definitions(peekaboo PRIVATE PEEKABOO_VERSION="${PEEKABOO_VERSION}")
 set_target_properties(peekaboo PROPERTIES WIN32_EXECUTABLE TRUE)
 target_include_directories(peekaboo PRIVATE ${stb_SOURCE_DIR} ${miniaudio_SOURCE_DIR})
 target_link_libraries(peekaboo PRIVATE imgui glfw OpenGL::GL)
 
 if(WIN32)
-    target_compile_definitions(peekaboo PRIVATE UNICODE _UNICODE)
+    # NOMINMAX for every translation unit, not just the ones that remember to
+    # ask: windows.h defines min and max as macros, and the first std::min it
+    # reaches turns into a syntax error.
+    target_compile_definitions(peekaboo PRIVATE UNICODE _UNICODE NOMINMAX)
     # runtimeobject and shcore are what Windows.Data.Pdf needs: the WinRT
     # activation core, and the IStream to IRandomAccessStream bridge.
     target_link_libraries(peekaboo PRIVATE advapi32 dwmapi mfplat mfreadwrite mfuuid ole32 oleaut32 runtimeobject
@@ -83,6 +97,12 @@ endif()
 
 if(MSVC)  # keep int main() with the Windows subsystem
     target_link_options(peekaboo PRIVATE /ENTRY:mainCRTStartup)
+endif()
+
+if(MINGW)
+    # Without this the executable wants libstdc++-6.dll, libgcc_s_seh-1.dll and
+    # libwinpthread-1.dll beside it, which is no way to hand someone a tray tool.
+    target_link_options(peekaboo PRIVATE -static -static-libgcc -static-libstdc++)
 endif()
 
 if(MSVC)
