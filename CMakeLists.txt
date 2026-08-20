@@ -57,6 +57,7 @@ add_executable(peekaboo
     src/main.cpp
     src/media.cpp
     src/overlay.cpp
+    src/pdf.cpp
     src/preview.cpp
     src/shell.cpp
     src/startup.cpp)
@@ -74,8 +75,10 @@ target_link_libraries(peekaboo PRIVATE imgui glfw OpenGL::GL)
 
 if(WIN32)
     target_compile_definitions(peekaboo PRIVATE UNICODE _UNICODE)
-    target_link_libraries(peekaboo PRIVATE advapi32 dwmapi mfplat mfreadwrite mfuuid ole32 oleaut32 shell32 shlwapi
-                                       uuid windowscodecs winmm)
+    # runtimeobject and shcore are what Windows.Data.Pdf needs: the WinRT
+    # activation core, and the IStream to IRandomAccessStream bridge.
+    target_link_libraries(peekaboo PRIVATE advapi32 dwmapi mfplat mfreadwrite mfuuid ole32 oleaut32 runtimeobject
+                                       shcore shell32 shlwapi uuid windowscodecs winmm)
 endif()
 
 if(MSVC)  # keep int main() with the Windows subsystem

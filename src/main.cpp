@@ -43,7 +43,7 @@ bool gSwallowedEnter = false;
 // Written by the mouse hook: wheel notches collected over the panel, and the
 // panel rectangle it tests them against.
 std::atomic<int> gWheel{0};
-std::atomic<bool> gMediaOpen{false};
+std::atomic<bool> gGrabWheel{false};
 std::atomic<LONG> gPanelLeft{0};
 std::atomic<LONG> gPanelTop{0};
 std::atomic<LONG> gPanelRight{0};
@@ -92,9 +92,10 @@ LRESULT CALLBACK keyboardHook(int code, WPARAM message, LPARAM data) {
 
 // The wheel would otherwise go to whatever has keyboard focus - Explorer, never
 // us, because the panel refuses focus by design. So we take it at the source,
-// but only while a media preview is on screen: text previews still want it.
+// but only for previews that do something with it: media and PDFs. Text
+// previews are left to the shell's own inactive-window scrolling.
 LRESULT CALLBACK mouseHook(int code, WPARAM message, LPARAM data) {
-    if (code != HC_ACTION || message != WM_MOUSEWHEEL || !gMediaOpen.load(std::memory_order_relaxed))
+    if (code != HC_ACTION || message != WM_MOUSEWHEEL || !gGrabWheel.load(std::memory_order_relaxed))
         return CallNextHookEx(nullptr, code, message, data);
 
     const auto& mouse = *reinterpret_cast<const MSLLHOOKSTRUCT*>(data);
@@ -150,8 +151,8 @@ HWND createTrayIcon(HINSTANCE instance) {
     description.hIconSm = loadAppIcon(instance, GetSystemMetrics(SM_CXSMICON));
     RegisterClassExW(&description);
 
-    HWND window = CreateWindowExW(0, description.lpszClassName, L"PeekaBoo", 0, 0, 0, 0, 0, nullptr, nullptr, instance,
-                                  nullptr);
+    HWND window = CreateWindowExW(WS_EX_TOOLWINDOW, description.lpszClassName, L"PeekaBoo", 0, 0, 0, 0, 0, nullptr,
+                                  nullptr, instance, nullptr);
     if (!window) return nullptr;
 
     gTray.cbSize = sizeof(gTray);
@@ -244,6 +245,11 @@ int main() {
     HINSTANCE instance = GetModuleHandleW(nullptr);
     HWND tray = createTrayIcon(instance);
     HWND native = glfwGetWin32Window(window);
+
+    // WS_EX_TOOLWINDOW alone does not reliably keep the panel out of the taskbar
+    // once the shell has seen the window. An owned window never gets a button at
+    // all, so the hidden tray window adopts it.
+    if (tray) SetWindowLongPtrW(native, GWLP_HWNDPARENT, reinterpret_cast<LONG_PTR>(tray));
     HHOOK hook = SetWindowsHookExW(WH_KEYBOARD_LL, keyboardHook, instance, 0);
     if (!hook) return fail(L"The keyboard hook could not be installed.");
     HHOOK wheel = SetWindowsHookExW(WH_MOUSE_LL, mouseHook, instance, 0);  // volume; not worth failing over
@@ -272,7 +278,7 @@ int main() {
             }
             if (gClose.exchange(false)) overlay.close();
             if (gPlayPause.exchange(false)) overlay.togglePlayback();
-            if (const int notches = gWheel.exchange(0)) overlay.adjustVolume(notches);
+            if (const int notches = gWheel.exchange(0)) overlay.wheel(notches);
 
             if (overlay.open()) {  // arrow keys stay in Explorer, we just follow its selection
                 if (const auto file = pb::shell::selectedFile(); file && *file != overlay.file()) overlay.show(*file);
@@ -280,7 +286,7 @@ int main() {
                 pb::shell::forget();
             }
             gOverlayOpen.store(overlay.open(), std::memory_order_relaxed);
-            gMediaOpen.store(overlay.open() && overlay.hasMedia(), std::memory_order_relaxed);
+            gGrabWheel.store(overlay.open() && overlay.wantsWheel(), std::memory_order_relaxed);
 
             if (RECT panel{}; overlay.open() && GetWindowRect(native, &panel)) {
                 gPanelLeft.store(panel.left, std::memory_order_relaxed);

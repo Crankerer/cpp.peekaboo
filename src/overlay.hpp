@@ -8,6 +8,7 @@
 #include <imgui.h>
 
 #include "media.hpp"
+#include "pdf.hpp"
 #include "preview.hpp"
 
 struct GLFWwindow;
@@ -29,10 +30,11 @@ public:
     void close();
     void togglePlayback();
     void skipPlayback(double seconds);  // relative jump, negative goes back
-    void adjustVolume(int steps);       // one step per mouse wheel notch
+    void wheel(int notches);            // volume on a media preview, scrolling on a PDF
 
     [[nodiscard]] bool open() const noexcept { return open_; }
-    [[nodiscard]] bool hasMedia() const noexcept { return player_ != nullptr; }
+    // Whether the wheel belongs to us rather than to whatever has focus.
+    [[nodiscard]] bool wantsWheel() const noexcept { return player_ != nullptr || pdf_ != nullptr; }
     [[nodiscard]] const std::filesystem::path& file() const noexcept { return current_.path; }
 
     void frame(float dt);  // build the ImGui frame; call between NewFrame and Render
@@ -82,6 +84,8 @@ private:
     void drawMedia(const Entry* entry, const ImVec2& min, const ImVec2& max, float ease);
     void drawTransport(const ImVec2& min, const ImVec2& max, float ease);  // seek bar, buttons, clock
     void drawVolume(const ImVec2& min, const ImVec2& max, float ease);     // slider at the right edge
+    void drawPdf(const ImVec2& min, const ImVec2& max, float ease);        // the scrolling page stack
+    void pumpPdf();
     void drawFooter(const Entry* entry, const ImVec2& min, const ImVec2& max, float ease);
 
     GLFWwindow* window_;
@@ -102,6 +106,12 @@ private:
     Texture video_;                          // streaming target for the player's frames
     float volume_ = 1.0f;                    // outlives the player, so it carries from file to file
 
+    std::unique_ptr<pdf::Document> pdf_;  // alive only while a PDF is on screen
+    std::vector<pdf::Page> pdfLayout_;    // page sizes, known before anything is rasterised
+    std::unordered_map<int, Texture> pdfPages_;  // rasterised pages near the viewport
+    float pdfScroll_ = 0.0f;
+    int pdfPage_ = 0;  // page the viewport is currently on, for the indicator
+
     Texture backdrop_;        // blurred snapshot of whatever is behind the panel
     ImVec2 backdropOrigin_{};  // screen region that snapshot covers
     ImVec2 backdropSize_{};
@@ -111,12 +121,6 @@ private:
     int windowHeight_ = 0;
     bool open_ = false;
     float anim_ = 0.0f;
-
-    std::chrono::steady_clock::time_point requestedAt_{};
-    bool awaitingContent_ = false;
-    double lastOpenMs_ = 0.0;
-    bool lastOpenWasHit_ = false;
-    std::deque<float> frameTimes_;
 };
 
 }  // namespace pb

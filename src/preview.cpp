@@ -211,6 +211,7 @@ Kind kindForExtension(std::string_view ext) {
     if (matches(images)) return Kind::Image;
     if (matches(texts)) return Kind::Text;
     if (matches(media)) return Kind::Media;
+    if (ext == "pdf") return Kind::Pdf;
     return Kind::Other;
 }
 
@@ -264,20 +265,8 @@ ImageData limitSize(ImageData image) {
     return reduced;
 }
 
-// Everything stb_image does not know: webp, tiff, ico, and whatever codecs the
-// system has installed. Returns an empty image if Windows cannot read it either.
-ImageData decodeWithWic(const fs::path& path) {
-    IWICImagingFactory* rawFactory = nullptr;
-    if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&rawFactory))))
-        return {};
-    const ComPtr<IWICImagingFactory> factory{rawFactory};
-
-    IWICBitmapDecoder* rawDecoder = nullptr;
-    if (FAILED(factory->CreateDecoderFromFilename(path.c_str(), nullptr, GENERIC_READ, WICDecodeMetadataCacheOnDemand,
-                                                  &rawDecoder)))
-        return {};
-    const ComPtr<IWICBitmapDecoder> decoder{rawDecoder};
-
+// The tail both WIC paths share: first frame, converted to straight RGBA.
+ImageData convertFirstFrame(IWICImagingFactory* factory, IWICBitmapDecoder* decoder) {
     IWICBitmapFrameDecode* rawFrame = nullptr;
     if (FAILED(decoder->GetFrame(0, &rawFrame))) return {};
     const ComPtr<IWICBitmapFrameDecode> frame{rawFrame};
@@ -303,6 +292,27 @@ ImageData decodeWithWic(const fs::path& path) {
     if (FAILED(converter->CopyPixels(nullptr, width * 4, static_cast<UINT>(image.rgba.size()), image.rgba.data())))
         return {};
     return image;
+}
+
+ComPtr<IWICImagingFactory> wicFactory() {
+    IWICImagingFactory* raw = nullptr;
+    if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&raw))))
+        return {};
+    return ComPtr<IWICImagingFactory>{raw};
+}
+
+// Everything stb_image does not know: webp, tiff, ico, and whatever codecs the
+// system has installed. Returns an empty image if Windows cannot read it either.
+ImageData decodeWithWic(const fs::path& path) {
+    const auto factory = wicFactory();
+    if (!factory) return {};
+
+    IWICBitmapDecoder* rawDecoder = nullptr;
+    if (FAILED(factory->CreateDecoderFromFilename(path.c_str(), nullptr, GENERIC_READ, WICDecodeMetadataCacheOnDemand,
+                                                  &rawDecoder)))
+        return {};
+    const ComPtr<IWICBitmapDecoder> decoder{rawDecoder};
+    return convertFirstFrame(factory.get(), decoder.get());
 }
 
 Content decodeImage(const FileEntry& file, std::span<const std::byte> raw) {
@@ -359,7 +369,9 @@ Content decodeText(std::span<const std::byte> raw) {
 
 Content loadContent(const FileEntry& file) {
     if (file.size == 0) return fallback(file, "Empty file");
-    if (file.kind == Kind::Media) return fallback(file, "");
+    // Media and PDFs are opened by their own subsystem; the shell's thumbnail is
+    // what the panel shows in the meantime.
+    if (file.kind == Kind::Media || file.kind == Kind::Pdf) return fallback(file, "");
     if (file.kind == Kind::Other && file.size > kBlobLimit) return fallback(file, "No preview available");
 
     const MappedFile mapped(file.path);
@@ -425,6 +437,22 @@ std::string humanSize(std::uintmax_t bytes) {
         ++unit;
     }
     return unit == 0 ? std::format("{} B", bytes) : std::format("{:.1f} {}", value, units[unit]);
+}
+
+ImageData decodeEncodedImage(const void* data, std::size_t size) {
+    if (!data || size == 0 || size > static_cast<std::size_t>(std::numeric_limits<UINT>::max())) return {};
+
+    const ComPtr<IStream> stream{SHCreateMemStream(static_cast<const BYTE*>(data), static_cast<UINT>(size))};
+    if (!stream) return {};
+
+    const auto factory = wicFactory();
+    if (!factory) return {};
+
+    IWICBitmapDecoder* rawDecoder = nullptr;
+    if (FAILED(factory->CreateDecoderFromStream(stream.get(), nullptr, WICDecodeMetadataCacheOnDemand, &rawDecoder)))
+        return {};
+    const ComPtr<IWICBitmapDecoder> decoder{rawDecoder};
+    return convertFirstFrame(factory.get(), decoder.get());
 }
 
 FileEntry describe(const fs::path& path) {

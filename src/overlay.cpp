@@ -50,6 +50,9 @@ constexpr float kVolumeColumn = 44.0f;    // width the volume slider needs to fl
 constexpr ImU32 kScrim = IM_COL32(14, 15, 20, 188);  // tint over the frosted control backing
 constexpr double kSkipSeconds = 10.0;
 constexpr float kVolumeStep = 0.05f;
+constexpr float kScrollStep = 120.0f;  // per wheel notch, roughly a paragraph
+constexpr float kPageGap = 14.0f;
+constexpr int kPagesAround = 3;  // rasterised pages kept either side of the viewport
 constexpr int kBlurDivisor = 8;
 constexpr float kButtonRounding = 8.0f;  // matches the radius Windows 11 rounds the window with
 constexpr ImU32 kButton = IM_COL32(18, 19, 23, 205);  // same weight as the text preview background
@@ -57,7 +60,6 @@ constexpr ImU32 kButtonHover = IM_COL32(34, 36, 44, 225);  // how hard the snaps
 constexpr int kChromeX = 44;   // padding left and right of the content
 constexpr int kChromeY = 122;  // title, meta line, separator and footer
 constexpr int kUploadsPerFrame = 2;
-constexpr std::size_t kFrameHistory = 180;
 constexpr std::array kPrefetchOffsets{1, -1, 2, -2};
 
 ImU32 kindColor(Kind kind) {
@@ -65,6 +67,7 @@ ImU32 kindColor(Kind kind) {
         case Kind::Image: return IM_COL32(45, 122, 118, 255);
         case Kind::Text: return IM_COL32(58, 92, 150, 255);
         case Kind::Media: return IM_COL32(120, 74, 148, 255);
+        case Kind::Pdf: return IM_COL32(150, 64, 64, 255);
         case Kind::Other: return IM_COL32(72, 74, 84, 255);
     }
     return kMuted;
@@ -267,10 +270,7 @@ void Overlay::show(const fs::path& file) {
     if (sameFile) return;
 
     current_ = describe(file);
-    requestedAt_ = std::chrono::steady_clock::now();
-    awaitingContent_ = true;
-    lastOpenWasHit_ = lookup(current_) != nullptr;
-    if (!lastOpenWasHit_) loader_.request(current_, true);
+    if (!lookup(current_)) loader_.request(current_, true);
 
     player_.reset();  // whatever was playing belongs to the file we just left
     video_ = Texture{};
@@ -278,6 +278,13 @@ void Overlay::show(const fs::path& file) {
         player_ = std::make_unique<media::Player>(current_.path);
         player_->setVolume(volume_);  // the level the user last set, not full blast
     }
+
+    pdf_.reset();
+    pdfLayout_.clear();
+    pdfPages_.clear();
+    pdfScroll_ = 0.0f;
+    pdfPage_ = 0;
+    if (current_.kind == Kind::Pdf) pdf_ = std::make_unique<pdf::Document>(current_.path);
 
     if (const fs::path parent = file.parent_path(); parent != siblingDir_) {
         siblingDir_ = parent;
@@ -301,7 +308,14 @@ void Overlay::skipPlayback(double seconds) {
     if (player_) player_->skip(seconds);
 }
 
-void Overlay::adjustVolume(int steps) { setVolume(volume_ + static_cast<float>(steps) * kVolumeStep); }
+// One wheel notch means whatever the preview on screen makes of it.
+void Overlay::wheel(int notches) {
+    if (player_) {
+        setVolume(volume_ + static_cast<float>(notches) * kVolumeStep);
+        return;
+    }
+    if (pdf_) pdfScroll_ -= static_cast<float>(notches) * kScrollStep;  // clamped once the layout is known
+}
 
 void Overlay::setVolume(float value) {
     volume_ = std::clamp(value, 0.0f, 1.0f);
@@ -311,6 +325,9 @@ void Overlay::setVolume(float value) {
 void Overlay::close() {
     player_.reset();
     video_ = Texture{};
+    pdf_.reset();
+    pdfLayout_.clear();
+    pdfPages_.clear();
     open_ = false;
     anim_ = 0.0f;
     glfwHideWindow(window_);
@@ -348,6 +365,12 @@ void Overlay::layoutWindow() {
                                       static_cast<float>(maxHeight - kChromeY) / player_->height()});
         width = std::clamp(static_cast<int>(player_->width() * scale) + kChromeX, kMinWidth, maxWidth);
         height = std::clamp(static_cast<int>(player_->height() * scale) + kChromeY, kMinHeight, maxHeight);
+    } else if (pdf_ && !pdfLayout_.empty()) {
+        // A page is tall, so it gets the height and asks for the width it needs.
+        const pdf::Page& first = pdfLayout_.front();
+        const float aspect = first.width > 0.0f ? first.height / first.width : 1.414f;
+        height = maxHeight;
+        width = std::clamp(static_cast<int>((maxHeight - kChromeY) / aspect) + kChromeX + 26, kMinWidth, maxWidth);
     } else if (current_.kind == Kind::Media) {
         width = std::min(kMediaWidth, maxWidth);  // audio, or video we have not opened yet
         height = std::min(kMediaHeight, maxHeight);
@@ -486,10 +509,8 @@ void Overlay::prefetch() {
 
 // --- drawing ----------------------------------------------------------------
 void Overlay::frame(float dt) {
-    frameTimes_.push_back(dt * 1000.0f);
-    if (frameTimes_.size() > kFrameHistory) frameTimes_.pop_front();
-
     pumpLoader();
+    pumpPdf();
     if (player_) {
         if (const auto frame = player_->takeFrame()) {
             if (!video_.valid() || video_.width != frame->width || video_.height != frame->height)
@@ -531,11 +552,6 @@ void Overlay::frame(float dt) {
     const ImVec2 contentMax(pos.x + size.x - 22.0f, pos.y + size.y - 44.0f);
     drawContent(entry, contentMin, contentMax, ease);
     drawFooter(entry, contentMin, contentMax, ease);
-
-    if (entry && awaitingContent_) {
-        lastOpenMs_ = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - requestedAt_).count();
-        awaitingContent_ = false;
-    }
 
     ImGui::End();
     ImGui::PopStyleVar(2);
@@ -584,10 +600,11 @@ void Overlay::drawHeader(const Entry* entry, float titleLimit) {
     if (player_) {
         if (const std::string details = player_->details(); !details.empty()) meta += "   " + details;
         meta += std::format("   {}", clockText(player_->duration()));
+    } else if (pdf_ && pdf_->pageCount() > 0) {
+        meta += std::format("   {} pages", pdf_->pageCount());
     } else if (entry) {
         if (const auto* image = std::get_if<ImageData>(&entry->preview.content))
             meta += std::format("   {} x {} px", image->sourceWidth, image->sourceHeight);
-        meta += std::format("   decoded in {:.2f} ms", entry->preview.loadMs);
     }
 
     ImGui::PushStyleColor(ImGuiCol_Text, kMuted);
@@ -726,11 +743,122 @@ void Overlay::drawVolume(const ImVec2& min, const ImVec2& max, float ease) {
                  fade(kMuted, ease), std::format("{}%", static_cast<int>(volume_ * 100.0f + 0.5f)));
 }
 
+// Rasterised pages arrive from the worker; the render thread is the only one
+// that may touch OpenGL, so this is where they become textures.
+void Overlay::pumpPdf() {
+    if (!pdf_) return;
+    if (pdfLayout_.empty() && pdf_->ready()) pdfLayout_ = pdf_->pages();
+
+    for (auto& rendered : pdf_->collect()) {
+        if (rendered.image.rgba.empty()) continue;
+        pdfPages_.insert_or_assign(rendered.index, Texture(rendered.image));
+    }
+}
+
+// The whole document as one scrolling column. Page sizes are known up front, so
+// the column can be laid out and scrolled before anything has been rasterised;
+// only the pages the viewport actually reaches are ever asked for.
+void Overlay::drawPdf(const ImVec2& min, const ImVec2& max, float ease) {
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    ImFont* font = ImGui::GetFont();
+
+    if (pdf_->failed()) {
+        centeredText(font, 16.0f, min, max, (min.y + max.y) * 0.5f, fade(kMuted, ease),
+                     "Windows cannot open this PDF");
+        return;
+    }
+    if (pdfLayout_.empty()) {
+        centeredText(font, 16.0f, min, max, (min.y + max.y) * 0.5f, fade(kMuted, ease), "opening...");
+        return;
+    }
+
+    const float viewport = max.y - min.y;
+    const float pageWidth = std::max(32.0f, max.x - min.x - 26.0f);  // leaves the scrollbar its lane
+
+    // Lay the column out, then clamp whatever the wheel did to it.
+    std::vector<float> tops;
+    tops.reserve(pdfLayout_.size());
+    float cursor = 0.0f;
+    for (const pdf::Page& page : pdfLayout_) {
+        tops.push_back(cursor);
+        const float aspect = page.width > 0.0f ? page.height / page.width : 1.414f;
+        cursor += pageWidth * aspect + kPageGap;
+    }
+    const float total = std::max(0.0f, cursor - kPageGap);
+    pdfScroll_ = std::clamp(pdfScroll_, 0.0f, std::max(0.0f, total - viewport));
+
+    const float left = min.x + (max.x - min.x - pageWidth - 18.0f) * 0.5f;
+    int firstVisible = -1;
+    int lastVisible = -1;
+
+    for (int index = 0; index < static_cast<int>(pdfLayout_.size()); ++index) {
+        const pdf::Page& page = pdfLayout_[index];
+        const float aspect = page.width > 0.0f ? page.height / page.width : 1.414f;
+        const float height = pageWidth * aspect;
+        const float top = min.y + tops[index] - pdfScroll_;
+        if (top > max.y || top + height < min.y) continue;
+
+        if (firstVisible < 0) firstVisible = index;
+        lastVisible = index;
+
+        const ImVec2 pageMin(left, top);
+        const ImVec2 pageMax(left + pageWidth, top + height);
+
+        const auto it = pdfPages_.find(index);
+        if (it != pdfPages_.end() && it->second.valid()) {
+            draw->AddImageRounded(textureId(it->second.id), pageMin, pageMax, ImVec2(0, 0), ImVec2(1, 1),
+                                  fade(IM_COL32_WHITE, ease), 4.0f);
+        } else {  // a blank sheet holds the place, so the column never jumps
+            pdf_->request(index, static_cast<int>(pageWidth));
+            draw->AddRectFilled(pageMin, pageMax, fade(IM_COL32(236, 238, 243, 255), ease * 0.5f), 4.0f);
+            centeredText(font, 15.0f, pageMin, pageMax, (pageMin.y + pageMax.y) * 0.5f, fade(kMuted, ease),
+                         std::format("page {}", index + 1));
+        }
+    }
+
+    if (firstVisible >= 0) pdfPage_ = firstVisible;
+
+    // Pages far from the viewport give their texture back.
+    if (firstVisible >= 0) {
+        std::erase_if(pdfPages_, [&](const auto& entry) {
+            return entry.first < firstVisible - kPagesAround || entry.first > lastVisible + kPagesAround;
+        });
+    }
+
+    // --- scrollbar, only worth drawing when there is something to scroll
+    if (total > viewport) {
+        const float trackX = max.x - 5.0f;
+        const float fraction = viewport / total;
+        const float thumb = std::max(28.0f, viewport * fraction);
+        const float travel = viewport - thumb;
+        const float offset = total > viewport ? pdfScroll_ / (total - viewport) : 0.0f;
+        draw->AddRectFilled(ImVec2(trackX - 2.5f, min.y), ImVec2(trackX + 2.5f, max.y), fade(kTrack, ease * 0.6f),
+                            2.5f);
+        draw->AddRectFilled(ImVec2(trackX - 2.5f, min.y + travel * offset),
+                            ImVec2(trackX + 2.5f, min.y + travel * offset + thumb), fade(kAccent, ease), 2.5f);
+    }
+
+    // --- page indicator
+    if (pdfLayout_.size() > 1) {
+        const std::string label = std::format("{} / {}", pdfPage_ + 1, pdfLayout_.size());
+        const float width = font->CalcTextSizeA(15.0f, FLT_MAX, 0.0f, label.c_str()).x;
+        const ImVec2 pillMin((min.x + max.x - width) * 0.5f - 14.0f, max.y - 40.0f);
+        const ImVec2 pillMax(pillMin.x + width + 28.0f, pillMin.y + 30.0f);
+        drawFrosted(pillMin, pillMax, 15.0f, ease);
+        draw->AddText(font, 15.0f, ImVec2(pillMin.x + 14.0f, pillMin.y + 7.0f), fade(kText, ease), label.c_str());
+    }
+}
+
 void Overlay::drawContent(const Entry* entry, const ImVec2& min, const ImVec2& max, float ease) {
     ImDrawList* draw = ImGui::GetWindowDrawList();
 
     if (player_) {
         drawMedia(entry, min, max, ease);
+        return;
+    }
+
+    if (pdf_) {
+        drawPdf(min, max, ease);
         return;
     }
 
@@ -794,17 +922,12 @@ void Overlay::drawContent(const Entry* entry, const ImVec2& min, const ImVec2& m
 }
 
 void Overlay::drawFooter(const Entry* entry, const ImVec2& min, const ImVec2& max, float ease) {
-    float average = 0.0f;
-    for (const float value : frameTimes_) average += value;
-    if (!frameTimes_.empty()) average /= static_cast<float>(frameTimes_.size());
-
     const auto* text = entry ? std::get_if<TextData>(&entry->preview.content) : nullptr;
-    const std::string footer = std::format(
-        "Space / Esc close     arrows browse{}     open {:.2f} ms ({})     {:.0f} FPS     cache {} / {}{}",
-        player_ ? "     Enter play / pause     wheel volume" : "", lastOpenMs_,
-        lastOpenWasHit_ ? "prefetched" : "decoded",
-        average > 0.0f ? 1000.0f / average : 0.0f, humanSize(cacheBytes_), humanSize(budget_),
-        text && text->truncated ? "     truncated at 1 MiB" : "");
+
+    std::string footer = "Space / Esc close     arrows browse";
+    if (player_) footer += "     Enter play / pause     wheel volume";
+    if (pdf_) footer += "     wheel scrolls";
+    if (text && text->truncated) footer += "     truncated at 1 MiB";
 
     centeredText(ImGui::GetFont(), 16.0f, min, max, max.y + 6.0f, fade(kMuted, ease), footer);
 }

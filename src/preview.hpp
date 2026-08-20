@@ -14,7 +14,7 @@
 
 namespace pb {
 
-enum class Kind { Image, Text, Media, Other };
+enum class Kind { Image, Text, Media, Pdf, Other };
 
 struct FileEntry {
     std::filesystem::path path;
@@ -37,6 +37,10 @@ struct ImageData {
     int sourceHeight{};
     std::vector<std::uint8_t> rgba;  // emptied once uploaded to the GPU
 };
+
+// Decodes an image that is already in memory, through Windows' own codecs.
+// Empty if Windows cannot read it. Callers must have COM running on the thread.
+[[nodiscard]] ImageData decodeEncodedImage(const void* data, std::size_t size);
 
 struct TextData {
     std::string text;
