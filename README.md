@@ -46,17 +46,18 @@ shortcut this borrows from makes exactly the same bargain.
 
 ![A video preview with the transport controls](doc/preview-video.png)
 
-Media files get a full transport row under the picture:
+Media files get a full set of controls, floating over the picture rather than taking room from it:
 
 | Control | What it does |
 | --- | --- |
 | ▶ / ❚❚ | play or pause — the `Enter` key does the same |
 | ⏪ ⏩ | jump ten seconds back or forward |
 | progress bar | click anywhere to jump there; hold and drag to scrub |
-| volume slider | on the right edge — drag it, or roll the **mouse wheel** anywhere over the panel |
+| volume slider | right hand edge — drag it, or roll the **mouse wheel** anywhere over the panel |
 
 The volume you set carries over to the next file you preview. Audio-only files show their embedded
-cover art in place of the picture.
+cover art in place of the picture. The controls are cut out of the same frosted material as the
+panel itself, so the video keeps the whole window.
 
 ## What can be previewed
 
