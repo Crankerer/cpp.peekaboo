@@ -791,6 +791,10 @@ void Overlay::drawPdf(const ImVec2& min, const ImVec2& max, float ease) {
     int firstVisible = -1;
     int lastVisible = -1;
 
+    // A page scrolled halfway out would otherwise paint straight over the title
+    // and the key hints: the column is only ever allowed inside the content area.
+    draw->PushClipRect(min, max, true);
+
     for (int index = 0; index < static_cast<int>(pdfLayout_.size()); ++index) {
         const pdf::Page& page = pdfLayout_[index];
         const float aspect = page.width > 0.0f ? page.height / page.width : 1.414f;
@@ -815,6 +819,8 @@ void Overlay::drawPdf(const ImVec2& min, const ImVec2& max, float ease) {
                          std::format("page {}", index + 1));
         }
     }
+
+    draw->PopClipRect();
 
     if (firstVisible >= 0) pdfPage_ = firstVisible;
 
